@@ -35,8 +35,11 @@ use tokio::{
 };
 use utils::{BatchQueue, EventBatch, process_rmp_file, validate_snapshot_consistency};
 
+pub mod cleanup;
 pub mod directory;
 pub mod utils;
+
+pub use cleanup::perform_cleanup;
 
 // WARNING - this code assumes no other file system operations are occurring in the watched directories
 // if there are scripts running, this may not work as intended

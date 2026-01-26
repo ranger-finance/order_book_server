@@ -2,6 +2,8 @@
 use std::net::Ipv4Addr;
 
 use clap::Parser;
+use log::{error, info};
+use orderbook_core::listener::perform_cleanup;
 use server::{Result, run_websocket_server};
 
 #[derive(Debug, Parser)]
@@ -25,6 +27,19 @@ struct Args {
     /// documentation for <https://docs.rs/flate2/1.1.2/flate2/struct.Compression.html#method.new> for more info.
     #[arg(long)]
     websocket_compression_level: Option<u32>,
+
+    /// Interval in hours between cleanup operations (optional)
+    /// Cleanup removes data older than the retention period
+    #[arg(long)]
+    cleanup_interval: Option<u64>,
+
+    /// Retention period in days for data cleanup (default: 7)
+    #[arg(long, default_value = "7")]
+    retention_days: u64,
+
+    /// Base directory for node data (default: ./data)
+    #[arg(long, default_value = "./data")]
+    base_dir: std::path::PathBuf,
 }
 
 #[tokio::main]
@@ -37,7 +52,40 @@ async fn main() -> Result<()> {
     println!("Running websocket server on {full_address}");
 
     let compression_level = args.websocket_compression_level.unwrap_or(/* Some compression */ 1);
-    run_websocket_server(&full_address, true, compression_level).await?;
+
+    if let Some(interval_hours) = args.cleanup_interval {
+        info!("Cleanup enabled: running every {} hours with {} days retention", interval_hours, args.retention_days);
+        info!("Initial cleanup before starting server...");
+
+        let base_dir = args.base_dir.clone();
+        let retention_days = args.retention_days as i64;
+
+        perform_cleanup(base_dir.clone(), retention_days).await?;
+
+        let cleanup_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(interval_hours * 3600));
+            loop {
+                interval.tick().await;
+                info!("Running periodic cleanup...");
+                if let Err(err) = perform_cleanup(base_dir.clone(), retention_days).await {
+                    error!("Cleanup failed: {}", err);
+                }
+            }
+        });
+
+        tokio::pin!(cleanup_handle);
+
+        tokio::select! {
+            result = run_websocket_server(&full_address, true, compression_level) => {
+                result?;
+            }
+            _ = &mut cleanup_handle => {
+                return Err("Cleanup task exited unexpectedly".into());
+            }
+        }
+    } else {
+        run_websocket_server(&full_address, true, compression_level).await?;
+    }
 
     Ok(())
 }
