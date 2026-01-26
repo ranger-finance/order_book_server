@@ -1031,6 +1031,8 @@ dependencies = [
  "clap",
  "env_logger",
  "futures-util",
+ "log",
+ "orderbook-core",
  "server",
  "tokio",
  "tokio-tungstenite",
