@@ -36,6 +36,10 @@ impl<O: InnerOrder> OrderBooks<O> {
         &self.order_books
     }
     #[must_use]
+    pub fn new() -> Self {
+        Self { order_books: BTreeMap::new() }
+    }
+    #[must_use]
     pub fn from_snapshots(snapshot: Snapshots<O>, ignore_triggers: bool) -> Self {
         Self {
             order_books: snapshot

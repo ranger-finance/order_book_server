@@ -17,6 +17,7 @@ itertools = "0.14.0"
 slab = "0.4"
 strum_macros = "0.27.2"
 dirs = "5"
+lapin = "2.5.0"
 
 [lints]
 workspace = true

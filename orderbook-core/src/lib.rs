@@ -10,13 +10,13 @@
 //! use orderbook_core::{OrderBookStream, StreamConfig, StreamEvent};
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 //!     let config = StreamConfig::default();
 //!     let stream = OrderBookStream::new(config).await?;
-//!     
+//!
 //!     let mut receiver = stream.subscribe();
 //!     stream.start().await?;
-//!     
+//!
 //!     while let Ok(event) = receiver.recv().await {
 //!         match event {
 //!             StreamEvent::L2Snapshot { coin, bids, asks, .. } => {
@@ -28,7 +28,7 @@
 //!             _ => {}
 //!         }
 //!     }
-//!     
+//!
 //!     Ok(())
 //! }
 //! ```
@@ -37,10 +37,12 @@
 
 pub mod listener;
 pub mod orderbook;
+pub mod publisher;
 mod prelude;
 mod state;
 mod stream;
 pub mod types;
+pub mod consumer;
 
 pub const HL_NODE: &str = "hl-node";
 

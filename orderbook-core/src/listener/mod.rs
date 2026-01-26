@@ -12,6 +12,7 @@ use crate::{
         inner::{InnerL4Order, InnerLevel},
         node_data::{Batch, EventSource, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
     },
+    publisher::SharedAmqpPublisher,
 };
 use alloy::primitives::Address;
 use fs::File;
@@ -47,6 +48,7 @@ pub async fn hl_listen(listener: Arc<Mutex<OrderBookListener>>, dir: PathBuf) ->
     let order_statuses_dir = EventSource::OrderStatuses.event_source_dir(&dir).canonicalize()?;
     let fills_dir = EventSource::Fills.event_source_dir(&dir).canonicalize()?;
     let order_diffs_dir = EventSource::OrderDiffs.event_source_dir(&dir).canonicalize()?;
+    println!("Starting to monitor HL node data directories...");
     info!("Monitoring order status directory: {}", order_statuses_dir.display());
     info!("Monitoring order diffs directory: {}", order_diffs_dir.display());
     info!("Monitoring fills directory: {}", fills_dir.display());
@@ -204,10 +206,15 @@ pub struct OrderBookListener {
     // Only Some when we want it to collect updates
     fetched_snapshot_cache: Option<VecDeque<(Batch<NodeDataOrderStatus>, Batch<NodeDataOrderDiff>)>>,
     internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
+    amqp_publisher: SharedAmqpPublisher,
 }
 
 impl OrderBookListener {
-    pub const fn new(internal_message_tx: Option<Sender<Arc<InternalMessage>>>, ignore_spot: bool) -> Self {
+    pub fn new(
+        internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
+        ignore_spot: bool,
+        amqp_publisher: SharedAmqpPublisher,
+    ) -> Self {
         Self {
             ignore_spot,
             fill_status_file: None,
@@ -219,6 +226,7 @@ impl OrderBookListener {
             internal_message_tx,
             order_diff_cache: BatchQueue::new(),
             order_status_cache: BatchQueue::new(),
+            amqp_publisher,
         }
     }
 
@@ -262,14 +270,36 @@ impl OrderBookListener {
     }
 
     fn receive_batch(&mut self, updates: EventBatch) -> Result<()> {
+        let amqp_publisher = self.amqp_publisher.clone();
         match updates {
             EventBatch::Orders(batch) => {
+                let batch_clone = batch.clone();
+                let amqp_publisher_clone = amqp_publisher.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = crate::publisher::publish_to_amqp(&amqp_publisher_clone, &batch_clone).await {
+                        error!("Failed to publish order status batch to AMQP: {}", err);
+                    }
+                });
                 self.order_status_cache.push(batch);
             }
             EventBatch::BookDiffs(batch) => {
+                let batch_clone = batch.clone();
+                let amqp_publisher_clone = amqp_publisher.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = crate::publisher::publish_to_amqp(&amqp_publisher_clone, &batch_clone).await {
+                        error!("Failed to publish order diff batch to AMQP: {}", err);
+                    }
+                });
                 self.order_diff_cache.push(batch);
             }
             EventBatch::Fills(batch) => {
+                let batch_clone = batch.clone();
+                let amqp_publisher_clone = amqp_publisher.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = crate::publisher::publish_to_amqp(&amqp_publisher_clone, &batch_clone).await {
+                        error!("Failed to publish fill batch to AMQP: {}", err);
+                    }
+                });
                 if self.last_fill.is_none_or(|height| height < batch.block_number()) {
                     // send fill updates if we received a new update
                     if let Some(tx) = &self.internal_message_tx {

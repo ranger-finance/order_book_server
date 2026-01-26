@@ -4,6 +4,7 @@ use crate::{
         Level,
         node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
     },
+    publisher::shared_publisher,
 };
 use std::{
     collections::HashSet,
@@ -79,7 +80,8 @@ impl OrderBookStream {
     pub async fn new(config: StreamConfig) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let (event_tx, _) = broadcast::channel(1024);
         
-        let listener = OrderBookListener::new(None, config.ignore_spot);
+        let amqp_publisher = shared_publisher(None);
+        let listener = OrderBookListener::new(None, config.ignore_spot, amqp_publisher);
         let listener = Arc::new(Mutex::new(listener));
         
         Ok(Self {

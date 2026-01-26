@@ -22,6 +22,10 @@ pub struct OrderBookState {
 }
 
 impl OrderBookState {
+    pub fn new(ignore_spot: bool) -> Self {
+        Self { order_book: OrderBooks::new(), height: 0, time: 0, snapped: false, ignore_spot }
+    }
+
     pub fn from_snapshot(
         snapshot: Snapshots<InnerL4Order>,
         height: u64,

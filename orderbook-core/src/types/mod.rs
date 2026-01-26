@@ -25,9 +25,9 @@ pub struct Trade {
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Level {
-    px: String,
-    sz: String,
-    n: usize,
+    pub px: String,
+    pub sz: String,
+    pub n: usize,
 }
 
 impl Level {
@@ -39,8 +39,8 @@ impl Level {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct L2Book {
     coin: String,
-    time: u64,
-    levels: [Vec<Level>; 2],
+    pub time: u64,
+    pub levels: [Vec<Level>; 2],
 }
 
 #[derive(Debug, Serialize, Deserialize)]

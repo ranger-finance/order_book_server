@@ -6,9 +6,10 @@ use orderbook_core::{
     types::{
         node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
     },
+    publisher::{SharedAmqpPublisher, shared_publisher},
     L2Book, L4Book, L4BookUpdates, L4Order, Trade,
 };
-use axum::{Router, response::IntoResponse, routing::get};
+use axum::{Extension, Router, response::IntoResponse, routing::get, Json};
 use futures_util::{SinkExt, StreamExt};
 use log::{error, info};
 use serde::{Deserialize, Serialize};
@@ -101,6 +102,12 @@ enum ServerResponse {
     Error(String),
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct HealthResponse {
+    amqp_connected: bool,
+    amqp_status: String,
+}
+
 #[derive(Default)]
 struct SubscriptionManager {
     subscriptions: HashSet<Subscription>,
@@ -115,18 +122,40 @@ impl SubscriptionManager {
         self.subscriptions.remove(&sub)
     }
 
-    const fn subscriptions(&self) -> &HashSet<Subscription> {
+    const     fn subscriptions(&self) -> &HashSet<Subscription> {
         &self.subscriptions
     }
 }
 
-pub async fn run_websocket_server(address: &str, ignore_spot: bool, compression_level: u32) -> super::Result<()> {
+async fn health_handler(Extension(amqp_publisher): Extension<SharedAmqpPublisher>) -> impl IntoResponse {
+    let amqp_publisher_guard = amqp_publisher.read().await;
+    let (amqp_connected, amqp_status) = match amqp_publisher_guard.as_ref() {
+        Some(publisher) => {
+            let health = publisher.health_check().await;
+            (publisher.is_connected(), health.to_string())
+        }
+        None => (false, "not_configured".to_string()),
+    };
+    let response = HealthResponse {
+        amqp_connected,
+        amqp_status,
+    };
+    Json(response)
+}
+
+pub async fn run_websocket_server(
+    address: &str,
+    ignore_spot: bool,
+    compression_level: u32,
+    amqp_publisher: Option<SharedAmqpPublisher>,
+) -> super::Result<()> {
     let (internal_message_tx, _) = channel::<Arc<InternalMessage>>(100);
 
     let home_dir = dirs::home_dir().ok_or("Could not find home directory")?;
+    let amqp_publisher_shared = amqp_publisher.unwrap_or_else(|| shared_publisher(None));
     let listener = {
         let internal_message_tx = internal_message_tx.clone();
-        OrderBookListener::new(Some(internal_message_tx), ignore_spot)
+        OrderBookListener::new(Some(internal_message_tx), ignore_spot, amqp_publisher_shared.clone())
     };
     let listener = Arc::new(Mutex::new(listener));
     {
@@ -141,15 +170,23 @@ pub async fn run_websocket_server(address: &str, ignore_spot: bool, compression_
 
     let websocket_opts =
         yawc::Options::default().with_compression_level(yawc::CompressionLevel::new(compression_level));
-    let app = Router::new().route(
-        "/ws",
-        get({
-            let internal_message_tx = internal_message_tx.clone();
-            async move |ws_upgrade| {
-                ws_handler(ws_upgrade, internal_message_tx.clone(), listener.clone(), ignore_spot, websocket_opts)
-            }
-        }),
-    );
+    let app = Router::new()
+        .route(
+            "/health",
+            get({
+                let amqp_publisher = amqp_publisher_shared.clone();
+                move || health_handler(Extension(amqp_publisher))
+            }),
+        )
+        .route(
+            "/ws",
+            get({
+                let internal_message_tx = internal_message_tx.clone();
+                async move |ws_upgrade| {
+                    ws_handler(ws_upgrade, internal_message_tx.clone(), listener.clone(), ignore_spot, websocket_opts)
+                }
+            }),
+        );
 
     let tcp_listener = TcpListener::bind(address).await?;
     info!("WebSocket server running at ws://{address}");

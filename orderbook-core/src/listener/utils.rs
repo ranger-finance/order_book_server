@@ -1,9 +1,9 @@
 use crate::{
     listener::{L2SnapshotParams, L2Snapshots},
     orderbook::{
-        Snapshot,
         multi_book::{OrderBooks, Snapshots},
         types::InnerOrder,
+        Snapshot,
     },
     prelude::*,
     types::{
@@ -41,6 +41,7 @@ pub async fn process_rmp_file(dir: &Path) -> Result<PathBuf> {
         .send()
         .await?
         .error_for_status()?;
+
     Ok(output_path)
 }
 
