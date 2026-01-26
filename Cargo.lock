@@ -3783,20 +3783,14 @@ dependencies = [
 name = "server"
 version = "0.1.0"
 dependencies = [
- "alloy",
  "axum",
- "chrono",
+ "dirs",
  "futures-util",
- "itertools 0.14.0",
  "log",
- "notify",
+ "orderbook-core",
  "rand 0.9.2",
- "rayon",
- "reqwest",
  "serde",
  "serde_json",
- "slab",
- "strum_macros",
  "tokio",
  "yawc",
 ]

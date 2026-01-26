@@ -1,11 +1,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
-mod listeners;
-mod order_book;
-mod prelude;
-mod servers;
-mod types;
+pub mod websocket;
 
-pub use prelude::Result;
-pub use servers::websocket_server::run_websocket_server;
+pub use orderbook_core::{OrderBookStream, StreamConfig, StreamEvent, Level, L2Book, L4Book, Trade};
+pub use websocket::run_websocket_server;
 
-pub const HL_NODE: &str = "hl-node";
+pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
