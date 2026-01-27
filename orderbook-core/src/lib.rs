@@ -41,8 +41,9 @@ pub mod publisher;
 mod prelude;
 mod state;
 mod stream;
-pub mod types;
+pub mod cache;
 pub mod consumer;
+pub mod types;
 
 pub const HL_NODE: &str = "hl-node";
 

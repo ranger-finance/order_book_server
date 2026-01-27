@@ -20,6 +20,7 @@ dirs = "5"
 lapin = { version = "2.5.4", features = [
     "rustls-native-certs",
 ], default-features = false }
+lru = "0.16.3"
 
 [lints]
 workspace = true

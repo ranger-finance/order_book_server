@@ -3317,6 +3317,7 @@ dependencies = [
  "itertools 0.14.0",
  "lapin",
  "log",
+ "lru",
  "notify",
  "rand 0.9.2",
  "rayon",

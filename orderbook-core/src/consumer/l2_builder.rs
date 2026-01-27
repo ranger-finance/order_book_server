@@ -1,4 +1,5 @@
 use crate::{
+    cache::OrderBookCache,
     listener::utils::{BatchQueue, EventBatch},
     orderbook::multi_book::Snapshots,
     orderbook::Coin,
@@ -13,6 +14,7 @@ use crate::{
 use log::{info, warn};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
 
 pub struct L2OrderBookBuilder {
     state: OrderBookState,
@@ -20,6 +22,7 @@ pub struct L2OrderBookBuilder {
     status_cache: BatchQueue<NodeDataOrderStatus>,
     diff_cache: BatchQueue<NodeDataOrderDiff>,
     ignore_spot: bool,
+    cache: OrderBookCache,
 }
 
 impl L2OrderBookBuilder {
@@ -30,6 +33,7 @@ impl L2OrderBookBuilder {
             status_cache: BatchQueue::new(),
             diff_cache: BatchQueue::new(),
             ignore_spot: false,
+            cache: OrderBookCache::new(NonZeroUsize::new(1000).unwrap()),
         }
     }
 
@@ -40,6 +44,7 @@ impl L2OrderBookBuilder {
             status_cache: BatchQueue::new(),
             diff_cache: BatchQueue::new(),
             ignore_spot,
+            cache: OrderBookCache::new(NonZeroUsize::new(1000).unwrap()),
         }
     }
 
@@ -120,6 +125,9 @@ impl L2OrderBookBuilder {
                 }
             }
             if !result.is_empty() {
+                for (coin, book) in &result {
+                    self.cache.put(coin.clone(), book.clone());
+                }
                 return Some(result);
             }
         }

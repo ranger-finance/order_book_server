@@ -36,7 +36,7 @@ impl Level {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct L2Book {
     coin: String,
     pub time: u64,
