@@ -4,7 +4,6 @@ use std::net::Ipv4Addr;
 use clap::Parser;
 use tracing::{error, info};
 use orderbook_core::listener::perform_cleanup;
-use orderbook_core::publisher::{AmqpPublisher, shared_publisher};
 use server::{Result, run_websocket_server};
 
 #[derive(Debug, Parser)]
@@ -42,13 +41,9 @@ struct Args {
     #[arg(long, default_value = "./data")]
     base_dir: std::path::PathBuf,
 
-    /// AMQP URL for publishing order book data (optional, defaults to LAVINMQ_URL env var)
+    /// AMQP URL for publishing L2 orderbook data (optional, defaults to LAVINMQ_URL env var)
     #[arg(long)]
     amqp_url: Option<String>,
-
-    /// AMQP queue name for publishing order book data (optional, default: "hl.fills.raw")
-    #[arg(long, default_value = "hl.fills.raw")]
-    amqp_queue: String,
 }
 
 #[tokio::main]
@@ -64,22 +59,7 @@ async fn main() -> Result<()> {
 
     let compression_level = args.websocket_compression_level.unwrap_or(/* Some compression */ 1);
 
-    let amqp_publisher = if let Some(ref amqp_url) = args.amqp_url {
-        info!("Initializing AMQP publisher to queue: {}", args.amqp_queue);
-        match AmqpPublisher::new(amqp_url.clone(), args.amqp_queue.clone()).await {
-            Ok(publisher) => {
-                info!("AMQP publisher initialized successfully");
-                Some(shared_publisher(Some(publisher)))
-            }
-            Err(err) => {
-                error!("Failed to initialize AMQP publisher: {}", err);
-                return Err(err);
-            }
-        }
-    } else {
-        info!("No AMQP URL provided, running without AMQP publishing");
-        None
-    };
+    let amqp_url = args.amqp_url.or_else(|| std::env::var("LAVINMQ_URL").ok());
 
     if let Some(interval_hours) = args.cleanup_interval {
         info!("Cleanup enabled: running every {} hours with {} days retention", interval_hours, args.retention_days);
@@ -104,7 +84,7 @@ async fn main() -> Result<()> {
         tokio::pin!(cleanup_handle);
 
         tokio::select! {
-            result = run_websocket_server(&full_address, true, compression_level, amqp_publisher) => {
+            result = run_websocket_server(&full_address, true, compression_level, amqp_url.as_deref()) => {
                 result?;
             }
             _ = &mut cleanup_handle => {
@@ -112,7 +92,7 @@ async fn main() -> Result<()> {
             }
         }
     } else {
-        run_websocket_server(&full_address, true, compression_level, amqp_publisher).await?;
+        run_websocket_server(&full_address, true, compression_level, amqp_url.as_deref()).await?;
     }
 
     Ok(())
