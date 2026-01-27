@@ -55,8 +55,6 @@ impl L2OrderBookBuilder {
                 self.fill_cache.push(batch);
             }
         }
-
-        info!("Consumed batch, attempting to apply updates to order book");
         self.try_apply_updates()?;
         Ok(())
     }

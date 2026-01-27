@@ -1,3 +1,5 @@
+use log::{error, info};
+
 use crate::{
     listener::{utils::compute_l2_snapshots, L2Snapshots, TimedSnapshots},
     orderbook::{
@@ -73,9 +75,16 @@ impl OrderBookState {
         let height = order_statuses.block_number();
         let time = order_statuses.block_time();
         assert_eq!(order_statuses.block_number(), order_diffs.block_number());
-        if height > self.height + 1 {
+        if self.height == 0 && height > 1 {
+            // Startup situation - we missed some blocks before starting
+            self.height = height - 1;
+            info!("Starting from block {}", height);
+        } else if height > self.height + 1 {
+            // Blocks are out of order
+            self.height = height;
             return Err(format!("Expecting block {}, got block {}", self.height + 1, height).into());
         } else if height <= self.height {
+            info!("Already at block {}, ignoring block {}", self.height, height);
             // This is not an error in case we started caching long before a snapshot is fetched
             return Ok(());
         }
@@ -91,6 +100,8 @@ impl OrderBookState {
                 }
             })
             .collect::<HashMap<_, _>>();
+
+        // Apply diffs
         while let Some(diff) = diffs.pop_front() {
             let oid = diff.oid();
             let coin = diff.coin();
@@ -109,24 +120,27 @@ impl OrderBookState {
                         inner_order.convert_trigger(time.try_into().unwrap());
                         self.order_book.add_order(inner_order);
                     } else {
-                        return Err(format!("Unable to find order opening status {diff:?}").into());
+                        error!("Unable to find order opening status {:?}", diff);
                     }
                 }
                 InnerOrderDiff::Update { new_sz, .. } => {
                     if !self.order_book.modify_sz(oid, coin, new_sz) {
-                        return Err(format!("Unable to find order on the book {diff:?}").into());
+                        error!("Unable to find order on the book {:?}", diff);
                     }
                 }
                 InnerOrderDiff::Remove => {
                     if !self.order_book.cancel_order(oid, coin) {
-                        return Err(format!("Unable to find order on the book {diff:?}").into());
+                        error!("Unable to find order on the book {:?}", diff);
                     }
                 }
             }
         }
+
         self.height += 1;
         self.time = time;
         self.snapped = false;
+        info!("Block height now at {}", self.height);
+
         Ok(())
     }
 }

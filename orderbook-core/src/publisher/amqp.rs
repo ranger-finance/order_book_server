@@ -1,6 +1,6 @@
 use lapin::{
     options::{BasicPublishOptions, QueueDeclareOptions},
-    types::FieldTable,
+    types::{FieldTable, LongString},
     BasicProperties, Channel, Connection, ConnectionProperties,
 };
 use log::{error, info};
@@ -20,12 +20,8 @@ pub struct AmqpPublisher {
 
 impl AmqpPublisher {
     pub async fn new(amqp_url: String, queue_name: String) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let mut publisher = Self {
-            connection: None,
-            channel: None,
-            amqp_url: amqp_url.clone(),
-            queue_name: queue_name.clone(),
-        };
+        let mut publisher =
+            Self { connection: None, channel: None, amqp_url: amqp_url.clone(), queue_name: queue_name.clone() };
         publisher.establish_connection().await?;
         Ok(publisher)
     }
@@ -39,46 +35,41 @@ impl AmqpPublisher {
             attempts += 1;
 
             match Connection::connect(&self.amqp_url, ConnectionProperties::default()).await {
-                Ok(conn) => {
-                    match conn.create_channel().await {
-                        Ok(channel) => {
-                            match channel
-                                .queue_declare(
-                                    &self.queue_name,
-                                    QueueDeclareOptions {
-                                        durable: true,
-                                        ..Default::default()
-                                    },
-                                    FieldTable::default(),
-                                )
-                                .await
-                            {
-                                Ok(_) => {
-                                    info!("AMQP connection established to queue: {}", self.queue_name);
-                                    self.connection = Some(conn);
-                                    self.channel = Some(channel);
-                                    return Ok(());
-                                }
-                                Err(e) => {
-                                    last_err = Some(e.into());
-                                }
+                Ok(conn) => match conn.create_channel().await {
+                    Ok(channel) => {
+                        let mut queue_args = FieldTable::default();
+                        queue_args.insert("x-dead-letter-exchange".into(), LongString::from("dlx_exchange").into());
+                        queue_args.insert("x-dead-letter-routing-key".into(), LongString::from("dlx_key").into());
+                        match channel
+                            .queue_declare(
+                                &self.queue_name,
+                                QueueDeclareOptions { durable: true, ..Default::default() },
+                                queue_args,
+                            )
+                            .await
+                        {
+                            Ok(_) => {
+                                info!("AMQP connection established to queue: {}", self.queue_name);
+                                self.connection = Some(conn);
+                                self.channel = Some(channel);
+                                return Ok(());
+                            }
+                            Err(e) => {
+                                last_err = Some(e.into());
                             }
                         }
-                        Err(e) => {
-                            last_err = Some(e.into());
-                        }
                     }
-                }
+                    Err(e) => {
+                        last_err = Some(e.into());
+                    }
+                },
                 Err(e) => {
                     last_err = Some(e.into());
                 }
             }
 
             let backoff_ms = (1000 * 2u64.pow((attempts - 1).min(5))).min(DEFAULT_MAX_BACKOFF_MS);
-            info!(
-                "AMQP connection attempt {} failed, retrying in {}ms...",
-                attempts, backoff_ms
-            );
+            info!("AMQP connection attempt {} failed, retrying in {}ms...", attempts, backoff_ms);
             tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
         }
 
@@ -131,10 +122,7 @@ impl AmqpPublisher {
 
             if attempts < max_attempts {
                 let backoff_ms = (100 * 2u64.pow((attempts - 1).min(5))).min(DEFAULT_MAX_BACKOFF_MS);
-                info!(
-                    "AMQP publish attempt {} failed, retrying in {}ms...",
-                    attempts, backoff_ms
-                );
+                info!("AMQP publish attempt {} failed, retrying in {}ms...", attempts, backoff_ms);
                 tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
             }
         }
