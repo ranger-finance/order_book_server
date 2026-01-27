@@ -3,7 +3,7 @@ use futures_util::{SinkExt, StreamExt};
 use lapin::{
     Connection, ConnectionProperties,
     options::{BasicConsumeOptions, BasicQosOptions, QueueDeclareOptions},
-    types::FieldTable,
+    types::{FieldTable, LongString},
 };
 use orderbook_core::consumer::{L2Delta, L2OrderBookBuilder, L2OrderBookStreamer};
 use orderbook_core::listener::utils::EventBatch;
@@ -230,17 +230,16 @@ async fn amqp_consumer_task(
     queue_name: String,
     batch_tx: tokio::sync::mpsc::UnboundedSender<EventBatch>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use lapin::options::BasicAckOptions;
-
     info!("Connecting to AMQP at {}", amqp_url);
     let conn = Connection::connect(&amqp_url, ConnectionProperties::default()).await?;
     let channel = conn.create_channel().await?;
 
     channel.basic_qos(10, BasicQosOptions::default()).await?;
 
-    channel
-        .queue_declare(&queue_name, QueueDeclareOptions { durable: true, ..Default::default() }, FieldTable::default())
-        .await?;
+    let mut queue_args = FieldTable::default();
+    queue_args.insert("x-dead-letter-exchange".into(), LongString::from("dlx_exchange").into());
+    queue_args.insert("x-dead-letter-routing-key".into(), LongString::from("dlx_key").into());
+    channel.queue_declare(&queue_name, QueueDeclareOptions { durable: true, ..Default::default() }, queue_args).await?;
 
     info!("Consuming from AMQP queue: {}", queue_name);
     let mut consumer =
@@ -249,26 +248,53 @@ async fn amqp_consumer_task(
     while let Some(delivery_result) = consumer.next().await {
         match delivery_result {
             Ok(delivery) => {
-                let data = delivery.data.clone();
-                let data_str = std::str::from_utf8(&data);
-
-                let _unused = delivery.ack(BasicAckOptions::default()).await;
-                
-                if let Ok(text) = data_str {
-                    if let Ok(fill_batch) = serde_json::from_str::<Batch<NodeDataFill>>(text) {
-                        let _unused = batch_tx.send(EventBatch::Fills(fill_batch));
-                    } else if let Ok(status_batch) = serde_json::from_str::<Batch<NodeDataOrderStatus>>(text) {
-                        let _unused = batch_tx.send(EventBatch::Orders(status_batch));
-                    } else if let Ok(diff_batch) = serde_json::from_str::<Batch<NodeDataOrderDiff>>(text) {
-                        let _unused = batch_tx.send(EventBatch::BookDiffs(diff_batch));
-                    } else {
-                        warn!("Failed to parse AMQP message");
-                    }
+                if let Err(err) = process_amqp_delivery(&delivery, &batch_tx).await {
+                    error!("Failed to process AMQP delivery: {}", err);
                 }
             }
             Err(err) => {
                 error!("AMQP consumer error: {}", err);
-                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn process_amqp_delivery(
+    delivery: &lapin::message::Delivery,
+    batch_tx: &tokio::sync::mpsc::UnboundedSender<EventBatch>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use lapin::options::{BasicAckOptions, BasicNackOptions};
+
+    let text = std::str::from_utf8(&delivery.data)?;
+
+    let batch_result = serde_json::from_str::<Batch<NodeDataFill>>(text)
+        .map(|b| EventBatch::Fills(b))
+        .or_else(|_| serde_json::from_str::<Batch<NodeDataOrderStatus>>(text).map(EventBatch::Orders))
+        .or_else(|_| serde_json::from_str::<Batch<NodeDataOrderDiff>>(text).map(EventBatch::BookDiffs));
+
+    let event_batch = match batch_result {
+        Ok(batch) => batch,
+        Err(_) => {
+            warn!("Failed to parse AMQP message: unknown format");
+            if let Err(err) = delivery.nack(BasicNackOptions { requeue: false, ..Default::default() }).await {
+                error!("Failed to nack AMQP message: {}", err);
+            };
+            return Ok(());
+        }
+    };
+
+    match batch_tx.send(event_batch) {
+        Ok(_) => {
+            if let Err(err) = delivery.ack(BasicAckOptions::default()).await {
+                error!("Failed to ack AMQP message: {}", err);
+            }
+        }
+        Err(err) => {
+            error!("Failed to send batch to channel: {}", err);
+            if let Err(err) = delivery.nack(BasicNackOptions { requeue: false, ..Default::default() }).await {
+                error!("Failed to nack AMQP message: {}", err);
             }
         }
     }
