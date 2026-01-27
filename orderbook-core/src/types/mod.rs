@@ -8,6 +8,7 @@ use crate::{
     types::node_data::{NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
 };
 
+pub mod amqp;
 pub mod inner;
 pub mod node_data;
 
@@ -89,7 +90,6 @@ impl L4BookUpdates {
     }
 }
 
-// RawL4Order is the version of a L4Order we want to serialize and deserialize directly
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct L4Order {

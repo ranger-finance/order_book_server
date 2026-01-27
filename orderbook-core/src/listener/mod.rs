@@ -1,23 +1,24 @@
 use crate::{
-    HL_NODE,
+    cache::OrderBookCache,
     listener::directory::DirectoryListener,
-    state::OrderBookState,
     orderbook::{
+        multi_book::{load_snapshots_from_json, Snapshots},
         Coin, Snapshot,
-        multi_book::{Snapshots, load_snapshots_from_json},
     },
     prelude::*,
+    state::OrderBookState,
     types::{
-        L4Order,
+        amqp::L2Message,
         inner::{InnerL4Order, InnerLevel},
         node_data::{Batch, EventSource, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
+        L2Book, L4Order, Level,
     },
-    publisher::SharedAmqpPublisher,
+    L2Emitter, HL_NODE,
 };
 use alloy::primitives::Address;
 use fs::File;
 use log::{error, info};
-use notify::{Event, RecursiveMode, Watcher, recommended_watcher};
+use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
@@ -28,13 +29,15 @@ use std::{
 };
 use tokio::{
     sync::{
-        Mutex,
         broadcast::Sender,
-        mpsc::{UnboundedSender, unbounded_channel},
+        mpsc::{unbounded_channel, UnboundedSender},
+        Mutex,
     },
-    time::{Instant, interval_at, sleep},
+    time::{interval_at, sleep, Instant},
 };
-use utils::{BatchQueue, EventBatch, process_rmp_file, validate_snapshot_consistency};
+use utils::{process_rmp_file, validate_snapshot_consistency, BatchQueue, EventBatch};
+
+const ALLOWED_COINS: &[&str] = &["BTC", "ETH", "SOL"];
 
 pub mod cleanup;
 pub mod directory;
@@ -206,15 +209,12 @@ pub struct OrderBookListener {
     // Only Some when we want it to collect updates
     fetched_snapshot_cache: Option<VecDeque<(Batch<NodeDataOrderStatus>, Batch<NodeDataOrderDiff>)>>,
     internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
-    amqp_publisher: SharedAmqpPublisher,
+    l2_emitter: L2Emitter,
+    l2_amqp_publisher: Option<Arc<crate::publisher::AmqpPublisher>>,
 }
 
 impl OrderBookListener {
-    pub fn new(
-        internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
-        ignore_spot: bool,
-        amqp_publisher: SharedAmqpPublisher,
-    ) -> Self {
+    pub fn new(internal_message_tx: Option<Sender<Arc<InternalMessage>>>, ignore_spot: bool) -> Self {
         Self {
             ignore_spot,
             fill_status_file: None,
@@ -226,7 +226,8 @@ impl OrderBookListener {
             internal_message_tx,
             order_diff_cache: BatchQueue::new(),
             order_status_cache: BatchQueue::new(),
-            amqp_publisher,
+            l2_emitter: L2Emitter::new_with_default_interval(OrderBookCache::default()),
+            l2_amqp_publisher: None,
         }
     }
 
@@ -234,12 +235,16 @@ impl OrderBookListener {
         self.order_book_state.clone()
     }
 
+    pub fn set_l2_amqp_publisher(&mut self, publisher: Arc<crate::publisher::AmqpPublisher>) {
+        self.l2_amqp_publisher = Some(publisher);
+    }
+
     pub const fn is_ready(&self) -> bool {
         self.order_book_state.is_some()
     }
 
     pub fn universe(&self) -> HashSet<Coin> {
-        self.order_book_state.as_ref().map_or_else(HashSet::new, OrderBookState::compute_universe)
+        self.order_book_state.as_ref().map_or(HashSet::new(), |state| state.compute_universe())
     }
 
     #[allow(clippy::type_complexity)]
@@ -270,38 +275,15 @@ impl OrderBookListener {
     }
 
     fn receive_batch(&mut self, updates: EventBatch) -> Result<()> {
-        let amqp_publisher = self.amqp_publisher.clone();
         match updates {
             EventBatch::Orders(batch) => {
-                let batch_clone = batch.clone();
-                let amqp_publisher_clone = amqp_publisher.clone();
-                tokio::spawn(async move {
-                    if let Err(err) = crate::publisher::publish_to_amqp(&amqp_publisher_clone, &batch_clone).await {
-                        error!("Failed to publish order status batch to AMQP: {}", err);
-                    }
-                });
                 self.order_status_cache.push(batch);
             }
             EventBatch::BookDiffs(batch) => {
-                let batch_clone = batch.clone();
-                let amqp_publisher_clone = amqp_publisher.clone();
-                tokio::spawn(async move {
-                    if let Err(err) = crate::publisher::publish_to_amqp(&amqp_publisher_clone, &batch_clone).await {
-                        error!("Failed to publish order diff batch to AMQP: {}", err);
-                    }
-                });
                 self.order_diff_cache.push(batch);
             }
             EventBatch::Fills(batch) => {
-                let batch_clone = batch.clone();
-                let amqp_publisher_clone = amqp_publisher.clone();
-                tokio::spawn(async move {
-                    if let Err(err) = crate::publisher::publish_to_amqp(&amqp_publisher_clone, &batch_clone).await {
-                        error!("Failed to publish fill batch to AMQP: {}", err);
-                    }
-                });
                 if self.last_fill.is_none_or(|height| height < batch.block_number()) {
-                    // send fill updates if we received a new update
                     if let Some(tx) = &self.internal_message_tx {
                         let tx = tx.clone();
                         tokio::spawn(async move {
@@ -372,6 +354,44 @@ impl OrderBookListener {
     // prevent snapshotting mutiple times at the same height
     fn l2_snapshots(&mut self, prevent_future_snaps: bool) -> Option<(u64, L2Snapshots)> {
         self.order_book_state.as_mut().and_then(|o| o.l2_snapshots(prevent_future_snaps))
+    }
+
+    fn emit_and_publish_l2(&mut self, snapshot: (u64, L2Snapshots)) {
+        let block_height = snapshot.0;
+        let l2_snapshots = snapshot.1;
+        let l2_amqp_publisher = self.l2_amqp_publisher.clone();
+
+        for (coin, params_map) in l2_snapshots.as_ref() {
+            if !ALLOWED_COINS.contains(&coin.value().as_str()) {
+                continue;
+            }
+            for (_params, snapshot_inner) in params_map {
+                let levels: [Vec<Level>; 2] = snapshot_inner.clone().export_inner_snapshot();
+                let l2_book = L2Book::from_l2_snapshot(coin.value(), levels, block_height);
+                let messages = self.l2_emitter.process_new_book(coin, &l2_book, block_height);
+
+                if let Some(ref publisher) = l2_amqp_publisher {
+                    let publisher = publisher.clone();
+                    for message in messages {
+                        let publisher = publisher.clone();
+                        tokio::spawn(async move {
+                            match message {
+                                L2Message::Snapshot(snapshot_msg) => {
+                                    if let Err(err) = publisher.publish_snapshot(&snapshot_msg).await {
+                                        error!("Failed to publish L2 snapshot to AMQP: {}", err);
+                                    }
+                                }
+                                L2Message::Delta(delta_msg) => {
+                                    if let Err(err) = publisher.publish_delta(&delta_msg).await {
+                                        error!("Failed to publish L2 delta to AMQP: {}", err);
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -471,18 +491,23 @@ impl DirectoryListener for OrderBookListener {
         }
         let snapshot = self.l2_snapshots(true);
         if let Some(snapshot) = snapshot {
+            let time = snapshot.0;
+            let l2_snapshots = snapshot.1.clone();
             if let Some(tx) = &self.internal_message_tx {
                 let tx = tx.clone();
+                let l2_snapshots_clone = l2_snapshots.clone();
                 tokio::spawn(async move {
-                    let snapshot = Arc::new(InternalMessage::Snapshot { l2_snapshots: snapshot.1, time: snapshot.0 });
+                    let snapshot = Arc::new(InternalMessage::Snapshot { l2_snapshots: l2_snapshots_clone, time });
                     let _unused = tx.send(snapshot);
                 });
             }
+            self.emit_and_publish_l2((time, l2_snapshots));
         }
         Ok(())
     }
 }
 
+#[derive(Clone)]
 pub struct L2Snapshots(pub HashMap<Coin, HashMap<L2SnapshotParams, Snapshot<InnerLevel>>>);
 
 impl L2Snapshots {
@@ -504,7 +529,7 @@ pub enum InternalMessage {
     L4BookUpdates { diff_batch: Batch<NodeDataOrderDiff>, status_batch: Batch<NodeDataOrderStatus> },
 }
 
-#[derive(Eq, PartialEq, Hash)]
+#[derive(Clone, Eq, PartialEq, Hash)]
 pub struct L2SnapshotParams {
     pub n_sig_figs: Option<u32>,
     pub mantissa: Option<u64>,

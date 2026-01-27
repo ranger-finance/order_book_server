@@ -44,6 +44,7 @@ mod stream;
 pub mod cache;
 pub mod consumer;
 pub mod types;
+pub mod l2_emitter;
 
 pub const HL_NODE: &str = "hl-node";
 
@@ -53,6 +54,9 @@ pub use stream::{
     StreamConfig,
     StreamEvent,
 };
+
+// Re-export L2Emitter for external use
+pub use l2_emitter::L2Emitter;
 
 // Re-export types for consumers who need them
 pub use types::{
