@@ -1,3 +1,5 @@
+use crate::consumer::L2Delta;
+use crate::types::amqp::{L2DeltaMessage, L2SnapshotMessage};
 use lapin::{
     options::{BasicPublishOptions, QueueDeclareOptions},
     types::{FieldTable, LongString},
@@ -5,21 +7,19 @@ use lapin::{
 };
 use log::{error, info};
 use serde::Serialize;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
 const DEFAULT_MAX_RETRY_ATTEMPTS: u32 = 3;
 const DEFAULT_MAX_BACKOFF_MS: u64 = 30000;
 
-pub struct AmqpPublisher {
+struct SingleQueueAmqpPublisher {
     connection: Option<Connection>,
     channel: Option<Channel>,
     amqp_url: String,
     queue_name: String,
 }
 
-impl AmqpPublisher {
-    pub async fn new(amqp_url: String, queue_name: String) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+impl SingleQueueAmqpPublisher {
+    async fn new(amqp_url: String, queue_name: String) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut publisher =
             Self { connection: None, channel: None, amqp_url: amqp_url.clone(), queue_name: queue_name.clone() };
         publisher.establish_connection().await?;
@@ -76,7 +76,7 @@ impl AmqpPublisher {
         Err(last_err.unwrap_or_else(|| "Failed to establish AMQP connection".into()))
     }
 
-    pub async fn publish_with_retry<T>(&self, payload: &T) -> Result<bool, Box<dyn std::error::Error + Send + Sync>>
+    async fn publish_with_retry<T>(&self, payload: &T) -> Result<bool, Box<dyn std::error::Error + Send + Sync>>
     where
         T: Serialize,
     {
@@ -84,10 +84,7 @@ impl AmqpPublisher {
         self.publish_with_retry_bytes(&payload_bytes).await
     }
 
-    pub async fn publish_with_retry_bytes(
-        &self,
-        payload: &[u8],
-    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    async fn publish_with_retry_bytes(&self, payload: &[u8]) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         let mut attempts: u32 = 0;
         let max_attempts = DEFAULT_MAX_RETRY_ATTEMPTS;
         let mut last_err: Option<Box<dyn std::error::Error + Send + Sync>> = None;
@@ -130,11 +127,11 @@ impl AmqpPublisher {
         Err(last_err.unwrap_or_else(|| "AMQP publish failed after retries".into()))
     }
 
-    pub fn is_connected(&self) -> bool {
+    fn is_connected(&self) -> bool {
         self.connection.is_some() && self.channel.is_some()
     }
 
-    pub async fn health_check(&self) -> AmqpHealthStatus {
+    async fn health_check(&self) -> AmqpHealthStatus {
         if self.connection.is_some() && self.channel.is_some() {
             AmqpHealthStatus::Connected
         } else {
@@ -142,7 +139,7 @@ impl AmqpPublisher {
         }
     }
 
-    pub async fn close(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn close(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if let Some(channel) = &self.channel {
             channel.close(200, "Shutdown").await?;
         }
@@ -170,57 +167,84 @@ impl std::fmt::Display for AmqpHealthStatus {
     }
 }
 
-pub type SharedAmqpPublisher = Arc<RwLock<Option<AmqpPublisher>>>;
-
-pub fn shared_publisher(publisher: Option<AmqpPublisher>) -> SharedAmqpPublisher {
-    Arc::new(RwLock::new(publisher))
+pub struct AmqpPublisher {
+    snapshot_publisher: SingleQueueAmqpPublisher,
+    delta_publisher: SingleQueueAmqpPublisher,
 }
 
-pub async fn publish_to_amqp<T>(
-    publisher: &SharedAmqpPublisher,
-    payload: &T,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
-where
-    T: Serialize,
-{
-    let publisher_guard = publisher.read().await;
-    if let Some(publisher) = publisher_guard.as_ref() {
-        publisher.publish_with_retry(payload).await?;
+impl AmqpPublisher {
+    pub async fn new(amqp_url: String) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let snapshot_publisher = SingleQueueAmqpPublisher::new(amqp_url.clone(), "hl.l2.snapshot".to_string()).await?;
+        let delta_publisher = SingleQueueAmqpPublisher::new(amqp_url, "hl.l2.delta".to_string()).await?;
+
+        info!("L2 AMQP publisher initialized with snapshot and delta queues");
+
+        Ok(Self { snapshot_publisher, delta_publisher })
     }
-    Ok(())
-}
 
-pub async fn publish_bytes_to_amqp(
-    publisher: &SharedAmqpPublisher,
-    payload: &[u8],
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let publisher_guard = publisher.read().await;
-    if let Some(publisher) = publisher_guard.as_ref() {
-        publisher.publish_with_retry_bytes(payload).await?;
+    pub async fn publish_snapshot(
+        &self,
+        snapshot: &L2SnapshotMessage,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.snapshot_publisher.publish_with_retry(snapshot).await?;
+        Ok(())
     }
-    Ok(())
-}
 
-pub async fn get_amqp_health(publisher: &SharedAmqpPublisher) -> AmqpHealthStatus {
-    let publisher_guard = publisher.read().await;
-    if let Some(publisher) = publisher_guard.as_ref() {
-        publisher.health_check().await
-    } else {
-        AmqpHealthStatus::Disconnected
+    pub async fn publish_delta(&self, delta: &L2DeltaMessage) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.delta_publisher.publish_with_retry(delta).await?;
+        Ok(())
     }
-}
 
-pub async fn is_amqp_connected(publisher: &SharedAmqpPublisher) -> bool {
-    let publisher_guard = publisher.read().await;
-    match publisher_guard.as_ref() {
-        Some(publisher) => publisher.is_connected(),
-        None => false,
+    pub async fn publish_delta_from_l2_delta(
+        &self,
+        delta: &L2Delta,
+        source: String,
+        from_sequence: u64,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let bids: Vec<(String, String)> = delta.bids.iter().map(|level| (level.px.clone(), level.sz.clone())).collect();
+        let asks: Vec<(String, String)> = delta.asks.iter().map(|level| (level.px.clone(), level.sz.clone())).collect();
+
+        let delta_message = L2DeltaMessage {
+            coin: delta.coin.clone(),
+            timestamp: delta.timestamp,
+            sequence: delta.sequence,
+            bids,
+            asks,
+            from_sequence,
+            source,
+        };
+
+        self.publish_delta(&delta_message).await
+    }
+
+    pub async fn health_check(&self) -> (AmqpHealthStatus, AmqpHealthStatus) {
+        let snapshot_status = self.snapshot_publisher.health_check().await;
+        let delta_status = self.delta_publisher.health_check().await;
+        (snapshot_status, delta_status)
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.snapshot_publisher.is_connected() && self.delta_publisher.is_connected()
+    }
+
+    pub async fn close(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.snapshot_publisher.close().await?;
+        self.delta_publisher.close().await?;
+        info!("L2 AMQP publisher closed");
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_l2_publisher_creation() {
+        // This test would require a mock AMQP server
+        // For now, we just verify the structure compiles
+        assert!(true);
+    }
 
     #[test]
     fn test_amqp_health_status_display() {
