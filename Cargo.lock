@@ -3354,6 +3354,7 @@ dependencies = [
  "bb8-redis",
  "chrono",
  "dirs",
+ "futures-util",
  "itertools 0.14.0",
  "log",
  "lru",

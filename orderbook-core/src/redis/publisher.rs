@@ -5,7 +5,6 @@ use bb8_redis::{
     bb8::{Pool, PooledConnection, RunError},
     redis::{AsyncCommands, RedisError, RedisResult, cmd},
 };
-use serde::Serialize;
 use std::io;
 use std::sync::Arc;
 
@@ -63,6 +62,20 @@ impl RedisPublisher {
             }
             None => Ok(None),
         }
+    }
+
+    /// Publish an update notification to Redis pub/sub
+    pub async fn publish_update_notification(&self, coin: &str) -> RedisResult<()> {
+        let channel = format!("{}:updates", self.key_prefix);
+
+        let mut conn: PooledConnection<'_, RedisConnectionManager> =
+            self.pool.get().await.map_err(|e: RunError<RedisError>| {
+                RedisError::from(io::Error::new(io::ErrorKind::Other, format!("Pool error: {}", e)))
+            })?;
+
+        conn.publish::<_, _, ()>(channel, coin).await?;
+
+        Ok(())
     }
 
     /// Check if Redis connection is healthy

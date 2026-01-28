@@ -2,7 +2,7 @@ use crate::{
     cache::{OrderBookCache, lru_cache::CoinLruCache},
     orderbook::Coin,
     redis::RedisPublisher,
-    types::{L2Book, Level},
+    types::L2Book,
 };
 use bb8_redis::redis::RedisError;
 use std::sync::Arc;
@@ -43,17 +43,24 @@ impl L2Emitter {
     pub async fn process_coin(&mut self, coin: &Coin, book: &L2Book, block_height: u64) -> Result<(), RedisError> {
         self.block_height = block_height;
 
+        let mut published = false;
         if self.should_emit_snapshot(coin) {
             self.redis_publisher.publish_l2_book(coin, book).await?;
             self.last_snapshot_block.insert(coin.clone(), block_height);
+            published = true;
         } else if let Some(prev_book) = self.cache.get(coin) {
             if self.has_changes(&prev_book, book) {
-                // let _delta = self.compute_delta(coin, &prev_book, book);
                 self.redis_publisher.publish_l2_book(coin, book).await?;
+                published = true;
             }
         } else {
             self.redis_publisher.publish_l2_book(coin, book).await?;
             self.last_snapshot_block.insert(coin.clone(), block_height);
+            published = true;
+        }
+
+        if published {
+            self.redis_publisher.publish_update_notification(&coin.value()).await?;
         }
 
         self.cache.put(coin.clone(), book.clone());
@@ -79,7 +86,7 @@ impl L2Emitter {
     // }
 
     pub fn has_changes(&self, old_book: &L2Book, new_book: &L2Book) -> bool {
-        old_book.block != new_book.block || old_book.time != new_book.time
+        old_book.time != new_book.time
     }
 
     // pub fn diff_levels(

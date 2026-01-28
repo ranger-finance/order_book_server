@@ -17,7 +17,7 @@ use crate::{
 };
 use alloy::primitives::Address;
 use fs::File;
-use log::{error, info};
+use log::{error, info, warn};
 use notify::{Event, RecursiveMode, Watcher, recommended_watcher};
 use std::{
     cmp::Ordering,
@@ -370,12 +370,15 @@ impl OrderBookListener {
                     if !ALLOWED_COINS.contains(&coin.value().as_str()) {
                         continue;
                     }
-                    for (_params, snapshot_inner) in params_map {
+                    let raw_params = L2SnapshotParams { n_sig_figs: None, mantissa: None };
+                    if let Some(snapshot_inner) = params_map.get(&raw_params) {
                         let levels: [Vec<Level>; 2] = snapshot_inner.clone().export_inner_snapshot();
                         let l2_book = L2Book::from_l2_snapshot(coin.value(), levels, block_height);
                         if let Err(err) = emitter.process_coin(coin, &l2_book, block_height).await {
                             error!("Failed to publish L2 data to Redis: {}", err);
                         }
+                    } else {
+                        warn!("Raw L2 snapshot not found for coin: {}", coin.value());
                     }
                 }
             });
