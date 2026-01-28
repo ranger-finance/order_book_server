@@ -1,7 +1,7 @@
 [package]
 name = "orderbook-core"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde", "clock"] }
@@ -17,13 +17,12 @@ itertools = "0.14.0"
 slab = "0.4"
 strum_macros = "0.27.2"
 dirs = "5"
-lapin = { version = "2.5.4", features = [
-    "rustls-native-certs",
-], default-features = false }
 lru = "0.16.3"
+bb8-redis = "0.26"
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 rand = "0.9.1"
+tokio-test = "0.4"
