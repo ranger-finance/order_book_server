@@ -41,9 +41,9 @@ struct Args {
     #[arg(long, default_value = "./data")]
     base_dir: std::path::PathBuf,
 
-    /// AMQP URL for publishing L2 orderbook data (optional, defaults to LAVINMQ_URL env var)
+    /// Redis URL for publishing L2 orderbook data (optional, defaults to REDIS_URL env var)
     #[arg(long)]
-    amqp_url: Option<String>,
+    redis_url: Option<String>,
 }
 
 #[tokio::main]
@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
 
     let compression_level = args.websocket_compression_level.unwrap_or(/* Some compression */ 1);
 
-    let amqp_url = args.amqp_url.or_else(|| std::env::var("LAVINMQ_URL").ok());
+    let redis_url = args.redis_url.or_else(|| std::env::var("REDIS_URL").ok());
 
     if let Some(interval_hours) = args.cleanup_interval {
         info!("Cleanup enabled: running every {} hours with {} days retention", interval_hours, args.retention_days);
@@ -84,7 +84,7 @@ async fn main() -> Result<()> {
         tokio::pin!(cleanup_handle);
 
         tokio::select! {
-            result = run_websocket_server(&full_address, true, compression_level, amqp_url.as_deref()) => {
+            result = run_websocket_server(&full_address, true, compression_level, redis_url.as_deref()) => {
                 result?;
             }
             _ = &mut cleanup_handle => {
@@ -92,7 +92,7 @@ async fn main() -> Result<()> {
             }
         }
     } else {
-        run_websocket_server(&full_address, true, compression_level, amqp_url.as_deref()).await?;
+        run_websocket_server(&full_address, true, compression_level, redis_url.as_deref()).await?;
     }
 
     Ok(())
