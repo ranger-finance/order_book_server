@@ -2,13 +2,13 @@ use axum::{Router, response::IntoResponse, routing::get};
 use futures_util::{SinkExt, StreamExt};
 use log::{error, info};
 use orderbook_core::{
-    L2Book, L4Book, L4BookUpdates, L4Order, Trade,
+    L2Book, L4Book, L4BookUpdates, L4Order, Trade, RedisPublisher,
     internal::{
         Coin, InnerLevel, InternalMessage, L2SnapshotParams, L2Snapshots, OrderBookListener, Snapshot, TimedSnapshots,
         hl_listen,
     },
-    publisher::AmqpPublisher,
     types::node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
+    RedisConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -126,37 +126,36 @@ pub async fn run_websocket_server(
     address: &str,
     ignore_spot: bool,
     compression_level: u32,
-    amqp_url: Option<&str>,
+    redis_url: Option<&str>,
 ) -> super::Result<()> {
     let (internal_message_tx, _) = channel::<Arc<InternalMessage>>(100);
+
+    let redis_publisher = if let Some(redis_url) = redis_url {
+        info!("Initializing Redis publisher");
+        let config = RedisConfig::from_url(redis_url.to_string());
+        match config.create_pool().await {
+            Ok(pool) => {
+                info!("Redis connection pool created successfully");
+                let publisher = RedisPublisher::new(Arc::new(pool), "orderbook".to_string());
+                info!("Redis publisher initialized successfully");
+                Some(Arc::new(publisher))
+            }
+            Err(err) => {
+                error!("Failed to initialize Redis connection pool: {}", err);
+                None
+            }
+        }
+    } else {
+        info!("No Redis URL provided, L2 snapshots and deltas will not be published");
+        None
+    };
 
     let home_dir = dirs::home_dir().ok_or("Could not find home directory")?;
     let listener = {
         let internal_message_tx = internal_message_tx.clone();
-        OrderBookListener::new(Some(internal_message_tx), ignore_spot)
+        OrderBookListener::new(Some(internal_message_tx), ignore_spot, redis_publisher)
     };
     let listener = Arc::new(Mutex::new(listener));
-
-    {
-        let listener_ref = listener.clone();
-        let amqp_url = amqp_url.map(String::from);
-        tokio::spawn(async move {
-            if let Some(amqp_url) = amqp_url {
-                info!("Initializing L2 AMQP publisher");
-                match AmqpPublisher::new(amqp_url).await {
-                    Ok(l2_publisher) => {
-                        info!("L2 AMQP publisher initialized successfully");
-                        listener_ref.lock().await.set_l2_amqp_publisher(Arc::new(l2_publisher));
-                    }
-                    Err(err) => {
-                        error!("Failed to initialize L2 AMQP publisher: {}", err);
-                    }
-                }
-            } else {
-                info!("No L2 AMQP URL provided, L2 snapshots and deltas will not be published");
-            }
-        });
-    }
 
     {
         let listener = listener.clone();

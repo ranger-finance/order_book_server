@@ -1,9 +1,9 @@
 use crate::{
     listener::{L2SnapshotParams, L2Snapshots},
     orderbook::{
+        Snapshot,
         multi_book::{OrderBooks, Snapshots},
         types::InnerOrder,
-        Snapshot,
     },
     prelude::*,
     types::{

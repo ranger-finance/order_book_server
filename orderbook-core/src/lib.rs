@@ -35,49 +35,40 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod cache;
+pub mod l2_emitter;
 pub mod listener;
 pub mod orderbook;
-pub mod publisher;
 mod prelude;
+pub mod redis;
 mod state;
 mod stream;
-pub mod cache;
-pub mod consumer;
 pub mod types;
-pub mod l2_emitter;
 
 pub const HL_NODE: &str = "hl-node";
 
 // Re-export main interface
-pub use stream::{
-    OrderBookStream,
-    StreamConfig,
-    StreamEvent,
-};
+pub use stream::{OrderBookStream, StreamConfig, StreamEvent};
 
 // Re-export L2Emitter for external use
 pub use l2_emitter::L2Emitter;
 
+// Re-export Redis modules
+pub use redis::{RedisConfig, RedisPublisher};
+
 // Re-export types for consumers who need them
 pub use types::{
-    Fill,
-    L4Order,
-    OrderDiff,
-    Trade,
-    Level,
-    L2Book,
-    L4Book,
-    L4BookUpdates,
     node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
+    Fill, L2Book, L4Book, L4BookUpdates, L4Order, Level, OrderDiff, Trade,
 };
 
-pub use orderbook::{Coin, Px, Sz, Side};
+pub use orderbook::{Coin, Px, Side, Sz};
 
 // Internal re-exports for the server crate
 #[doc(hidden)]
 pub mod internal {
     pub use crate::listener::*;
-    pub use crate::state::*;
     pub use crate::orderbook::*;
+    pub use crate::state::*;
     pub use crate::types::inner::*;
 }

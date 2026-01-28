@@ -1,3 +1,5 @@
+pub mod lru_cache;
+
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 

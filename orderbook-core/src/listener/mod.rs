@@ -1,24 +1,24 @@
 use crate::{
+    HL_NODE, L2Emitter,
     cache::OrderBookCache,
     listener::directory::DirectoryListener,
     orderbook::{
-        multi_book::{load_snapshots_from_json, Snapshots},
         Coin, Snapshot,
+        multi_book::{Snapshots, load_snapshots_from_json},
     },
     prelude::*,
+    redis::RedisPublisher,
     state::OrderBookState,
     types::{
-        amqp::L2Message,
+        L2Book, L4Order, Level,
         inner::{InnerL4Order, InnerLevel},
         node_data::{Batch, EventSource, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
-        L2Book, L4Order, Level,
     },
-    L2Emitter, HL_NODE,
 };
 use alloy::primitives::Address;
 use fs::File;
 use log::{error, info};
-use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
+use notify::{Event, RecursiveMode, Watcher, recommended_watcher};
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
@@ -29,13 +29,13 @@ use std::{
 };
 use tokio::{
     sync::{
-        broadcast::Sender,
-        mpsc::{unbounded_channel, UnboundedSender},
         Mutex,
+        broadcast::Sender,
+        mpsc::{UnboundedSender, unbounded_channel},
     },
-    time::{interval_at, sleep, Instant},
+    time::{Instant, interval_at, sleep},
 };
-use utils::{process_rmp_file, validate_snapshot_consistency, BatchQueue, EventBatch};
+use utils::{BatchQueue, EventBatch, process_rmp_file, validate_snapshot_consistency};
 
 const ALLOWED_COINS: &[&str] = &["BTC", "ETH", "SOL"];
 
@@ -209,12 +209,19 @@ pub struct OrderBookListener {
     // Only Some when we want it to collect updates
     fetched_snapshot_cache: Option<VecDeque<(Batch<NodeDataOrderStatus>, Batch<NodeDataOrderDiff>)>>,
     internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
-    l2_emitter: L2Emitter,
-    l2_amqp_publisher: Option<Arc<crate::publisher::AmqpPublisher>>,
+    l2_emitter: Option<Arc<Mutex<L2Emitter>>>,
 }
 
 impl OrderBookListener {
-    pub fn new(internal_message_tx: Option<Sender<Arc<InternalMessage>>>, ignore_spot: bool) -> Self {
+    pub fn new(
+        internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
+        ignore_spot: bool,
+        redis_publisher: Option<Arc<RedisPublisher>>,
+    ) -> Self {
+        let l2_emitter = redis_publisher.map(|publisher| {
+            Arc::new(Mutex::new(L2Emitter::new_with_default_interval(OrderBookCache::default(), publisher)))
+        });
+
         Self {
             ignore_spot,
             fill_status_file: None,
@@ -226,17 +233,12 @@ impl OrderBookListener {
             internal_message_tx,
             order_diff_cache: BatchQueue::new(),
             order_status_cache: BatchQueue::new(),
-            l2_emitter: L2Emitter::new_with_default_interval(OrderBookCache::default()),
-            l2_amqp_publisher: None,
+            l2_emitter,
         }
     }
 
     fn clone_state(&self) -> Option<OrderBookState> {
         self.order_book_state.clone()
-    }
-
-    pub fn set_l2_amqp_publisher(&mut self, publisher: Arc<crate::publisher::AmqpPublisher>) {
-        self.l2_amqp_publisher = Some(publisher);
     }
 
     pub const fn is_ready(&self) -> bool {
@@ -358,39 +360,25 @@ impl OrderBookListener {
 
     fn emit_and_publish_l2(&mut self, snapshot: (u64, L2Snapshots)) {
         let block_height = snapshot.0;
-        let l2_snapshots = snapshot.1;
-        let l2_amqp_publisher = self.l2_amqp_publisher.clone();
+        let l2_snapshots = snapshot.1.clone();
 
-        for (coin, params_map) in l2_snapshots.as_ref() {
-            if !ALLOWED_COINS.contains(&coin.value().as_str()) {
-                continue;
-            }
-            for (_params, snapshot_inner) in params_map {
-                let levels: [Vec<Level>; 2] = snapshot_inner.clone().export_inner_snapshot();
-                let l2_book = L2Book::from_l2_snapshot(coin.value(), levels, block_height);
-                let messages = self.l2_emitter.process_new_book(coin, &l2_book, block_height);
-
-                if let Some(ref publisher) = l2_amqp_publisher {
-                    let publisher = publisher.clone();
-                    for message in messages {
-                        let publisher = publisher.clone();
-                        tokio::spawn(async move {
-                            match message {
-                                L2Message::Snapshot(snapshot_msg) => {
-                                    if let Err(err) = publisher.publish_snapshot(&snapshot_msg).await {
-                                        error!("Failed to publish L2 snapshot to AMQP: {}", err);
-                                    }
-                                }
-                                L2Message::Delta(delta_msg) => {
-                                    if let Err(err) = publisher.publish_delta(&delta_msg).await {
-                                        error!("Failed to publish L2 delta to AMQP: {}", err);
-                                    }
-                                }
-                            }
-                        });
+        if let Some(ref l2_emitter) = self.l2_emitter {
+            let emitter_arc = l2_emitter.clone();
+            tokio::spawn(async move {
+                let mut emitter = emitter_arc.lock().await;
+                for (coin, params_map) in l2_snapshots.as_ref() {
+                    if !ALLOWED_COINS.contains(&coin.value().as_str()) {
+                        continue;
+                    }
+                    for (_params, snapshot_inner) in params_map {
+                        let levels: [Vec<Level>; 2] = snapshot_inner.clone().export_inner_snapshot();
+                        let l2_book = L2Book::from_l2_snapshot(coin.value(), levels, block_height);
+                        if let Err(err) = emitter.process_coin(coin, &l2_book, block_height).await {
+                            error!("Failed to publish L2 data to Redis: {}", err);
+                        }
                     }
                 }
-            }
+            });
         }
     }
 }

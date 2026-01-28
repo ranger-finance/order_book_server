@@ -8,7 +8,6 @@ use crate::{
     types::node_data::{NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
 };
 
-pub mod amqp;
 pub mod inner;
 pub mod node_data;
 

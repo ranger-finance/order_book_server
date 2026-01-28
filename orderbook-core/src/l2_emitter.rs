@@ -1,138 +1,124 @@
 use crate::{
-    cache::OrderBookCache,
+    cache::{OrderBookCache, lru_cache::CoinLruCache},
     orderbook::Coin,
-    types::{amqp::L2Message, L2Book, Level},
+    redis::RedisPublisher,
+    types::{L2Book, Level},
 };
+use bb8_redis::redis::RedisError;
+use std::sync::Arc;
+
+// #[derive(Debug, Clone, Serialize, Deserialize)]
+// #[serde(rename_all = "camelCase")]
+// pub struct L2DeltaMessage {
+//     pub coin: String,
+//     pub timestamp: u64,
+//     pub bids: Vec<(String, String)>,
+//     pub asks: Vec<(String, String)>,
+//     pub source: String,
+// }
 
 pub struct L2Emitter {
     cache: OrderBookCache,
-    sequence: u64,
+    redis_publisher: Arc<RedisPublisher>,
+    last_snapshot_block: CoinLruCache<Coin, u64>,
     block_height: u64,
     snapshot_interval: u64,
-    last_snapshot_block: u64,
 }
 
 impl L2Emitter {
-    pub fn new(cache: OrderBookCache, snapshot_interval: u64) -> Self {
-        Self { cache, sequence: 0, block_height: 0, snapshot_interval, last_snapshot_block: 0 }
+    pub fn new(cache: OrderBookCache, redis_publisher: Arc<RedisPublisher>, snapshot_interval: u64) -> Self {
+        Self {
+            cache,
+            redis_publisher,
+            last_snapshot_block: CoinLruCache::<Coin, u64>::new(1000),
+            block_height: 0,
+            snapshot_interval,
+        }
     }
 
-    pub fn new_with_default_interval(cache: OrderBookCache) -> Self {
-        Self::new(cache, 100)
+    pub fn new_with_default_interval(cache: OrderBookCache, redis_publisher: Arc<RedisPublisher>) -> Self {
+        Self::new(cache, redis_publisher, 100)
     }
 
-    pub fn process_new_book(&mut self, coin: &Coin, book: &L2Book, block_height: u64) -> Vec<L2Message> {
+    pub async fn process_coin(&mut self, coin: &Coin, book: &L2Book, block_height: u64) -> Result<(), RedisError> {
         self.block_height = block_height;
-        let mut messages = Vec::new();
 
-        if self.should_emit_snapshot() {
-            let snapshot = self.create_snapshot_message(coin, book);
-            messages.push(snapshot);
-            self.last_snapshot_block = block_height;
-            self.cache.put(coin.clone(), book.clone());
+        if self.should_emit_snapshot(coin) {
+            self.redis_publisher.publish_l2_book(coin, book).await?;
+            self.last_snapshot_block.insert(coin.clone(), block_height);
         } else if let Some(prev_book) = self.cache.get(coin) {
-            if let Some(delta) = self.compute_delta_if_changed(coin, &prev_book, book) {
-                messages.push(delta);
+            if self.has_changes(&prev_book, book) {
+                // let _delta = self.compute_delta(coin, &prev_book, book);
+                self.redis_publisher.publish_l2_book(coin, book).await?;
             }
         } else {
-            let snapshot = self.create_snapshot_message(coin, book);
-            messages.push(snapshot);
-            self.last_snapshot_block = block_height;
-            self.cache.put(coin.clone(), book.clone());
+            self.redis_publisher.publish_l2_book(coin, book).await?;
+            self.last_snapshot_block.insert(coin.clone(), block_height);
         }
 
-        messages
+        self.cache.put(coin.clone(), book.clone());
+
+        Ok(())
     }
 
-    pub fn should_emit_snapshot(&self) -> bool {
-        self.block_height - self.last_snapshot_block >= self.snapshot_interval
+    pub fn should_emit_snapshot(&self, coin: &Coin) -> bool {
+        let last_block = self.last_snapshot_block.get(coin).unwrap_or(0);
+        self.block_height - last_block >= self.snapshot_interval
     }
 
-    pub fn compute_delta(&mut self, coin: &Coin, old_book: &L2Book, new_book: &L2Book) -> L2Message {
-        self.sequence += 1;
+    // pub fn compute_delta(&self, coin: &Coin, old_book: &L2Book, new_book: &L2Book) -> L2DeltaMessage {
+    //     let (bids_delta, asks_delta) = self.diff_levels(&old_book.levels, &new_book.levels);
+    //
+    //     L2DeltaMessage {
+    //         coin: coin.value(),
+    //         timestamp: new_book.time,
+    //         bids: bids_delta,
+    //         asks: asks_delta,
+    //         source: "orderbook".to_string(),
+    //     }
+    // }
 
-        let (bids_delta, asks_delta) = self.diff_levels(&old_book.levels, &new_book.levels);
-
-        let from_sequence = self.sequence.saturating_sub(1);
-
-        L2Message::Delta(crate::types::amqp::L2DeltaMessage {
-            coin: coin.value(),
-            timestamp: new_book.time,
-            sequence: self.sequence,
-            bids: bids_delta,
-            asks: asks_delta,
-            from_sequence,
-            source: "orderbook".to_string(),
-        })
+    pub fn has_changes(&self, old_book: &L2Book, new_book: &L2Book) -> bool {
+        old_book.block != new_book.block || old_book.time != new_book.time
     }
 
-    pub fn compute_delta_if_changed(&mut self, coin: &Coin, old_book: &L2Book, new_book: &L2Book) -> Option<L2Message> {
-        let (bids_delta, asks_delta) = self.diff_levels(&old_book.levels, &new_book.levels);
+    // pub fn diff_levels(
+    //     &self,
+    //     old_levels: &[Vec<Level>; 2],
+    //     new_levels: &[Vec<Level>; 2],
+    // ) -> (Vec<(String, String)>, Vec<(String, String)>) {
+    //     let bids_delta = self.diff_level_list(&old_levels[0], &new_levels[0]);
+    //     let asks_delta = self.diff_level_list(&old_levels[1], &new_levels[1]);
+    //
+    //     (bids_delta, asks_delta)
+    // }
 
-        if bids_delta.is_empty() && asks_delta.is_empty() {
-            None
-        } else {
-            Some(self.compute_delta(coin, old_book, new_book))
-        }
-    }
-
-    pub fn diff_levels(
-        &self,
-        old_levels: &[Vec<Level>; 2],
-        new_levels: &[Vec<Level>; 2],
-    ) -> (Vec<(String, String)>, Vec<(String, String)>) {
-        let bids_delta = self.diff_level_list(&old_levels[0], &new_levels[0]);
-        let asks_delta = self.diff_level_list(&old_levels[1], &new_levels[1]);
-
-        (bids_delta, asks_delta)
-    }
-
-    fn diff_level_list(&self, old_levels: &[Level], new_levels: &[Level]) -> Vec<(String, String)> {
-        let mut deltas = Vec::new();
-
-        let max_len = old_levels.len().max(new_levels.len());
-        for i in 0..max_len {
-            let old_level = old_levels.get(i);
-            let new_level = new_levels.get(i);
-
-            match (old_level, new_level) {
-                (Some(old), Some(new)) => {
-                    if old.px != new.px || old.sz != new.sz || old.n != new.n {
-                        deltas.push((new.px.clone(), new.sz.clone()));
-                    }
-                }
-                (None, Some(new)) => {
-                    deltas.push((new.px.clone(), new.sz.clone()));
-                }
-                (Some(old), None) => {
-                    deltas.push((old.px.clone(), "0".to_string()));
-                }
-                (None, None) => {}
-            }
-        }
-
-        deltas
-    }
-
-    fn create_snapshot_message(&mut self, coin: &Coin, book: &L2Book) -> L2Message {
-        self.sequence += 1;
-
-        let bids: Vec<(String, String)> = book.levels[0].iter().map(|l| (l.px.clone(), l.sz.clone())).collect();
-        let asks: Vec<(String, String)> = book.levels[1].iter().map(|l| (l.px.clone(), l.sz.clone())).collect();
-
-        L2Message::Snapshot(crate::types::amqp::L2SnapshotMessage {
-            coin: coin.value(),
-            timestamp: book.time,
-            sequence: self.sequence,
-            bids,
-            asks,
-            source: "orderbook".to_string(),
-        })
-    }
-
-    pub const fn sequence(&self) -> u64 {
-        self.sequence
-    }
+    // fn diff_level_list(&self, old_levels: &[Level], new_levels: &[Level]) -> Vec<(String, String)> {
+    //     let mut deltas = Vec::new();
+    //
+    //     let max_len = old_levels.len().max(new_levels.len());
+    //     for i in 0..max_len {
+    //         let old_level = old_levels.get(i);
+    //         let new_level = new_levels.get(i);
+    //
+    //         match (old_level, new_level) {
+    //             (Some(old), Some(new)) => {
+    //                 if old.px != new.px || old.sz != new.sz || old.n != new.n {
+    //                     deltas.push((new.px.clone(), new.sz.clone()));
+    //                 }
+    //             }
+    //             (None, Some(new)) => {
+    //                 deltas.push((new.px.clone(), new.sz.clone()));
+    //             }
+    //             (Some(old), None) => {
+    //                 deltas.push((old.px.clone(), "0".to_string()));
+    //             }
+    //             (None, None) => {}
+    //         }
+    //     }
+    //
+    //     deltas
+    // }
 
     pub const fn block_height(&self) -> u64 {
         self.block_height
@@ -148,11 +134,5 @@ impl L2Emitter {
 
     pub fn set_snapshot_interval(&mut self, interval: u64) {
         self.snapshot_interval = interval;
-    }
-}
-
-impl Default for L2Emitter {
-    fn default() -> Self {
-        Self::new_with_default_interval(OrderBookCache::default())
     }
 }
