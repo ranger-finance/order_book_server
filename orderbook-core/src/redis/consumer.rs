@@ -4,7 +4,7 @@ use crate::types::L2Book;
 use bb8_redis::{
     RedisConnectionManager,
     bb8::{Pool, PooledConnection, RunError},
-    redis::{AsyncCommands, Client, RedisError, RedisResult, aio::PubSub, cmd},
+    redis::{AsyncCommands, Client, RedisError, RedisResult, cmd},
 };
 use futures_util::StreamExt;
 use log::warn;
@@ -12,11 +12,12 @@ use log::warn;
 pub struct RedisConsumer {
     pool: Pool<RedisConnectionManager>,
     key_prefix: String,
+    redis_url: String,
 }
 
 impl RedisConsumer {
-    pub async fn new(pool: Pool<RedisConnectionManager>, key_prefix: String) -> Self {
-        Self { pool, key_prefix }
+    pub async fn new(pool: Pool<RedisConnectionManager>, key_prefix: String, redis_url: String) -> Self {
+        Self { pool, key_prefix, redis_url }
     }
 
     fn get_orderbook_key(&self, coin: &str) -> String {
@@ -50,11 +51,12 @@ impl RedisConsumer {
 
     pub async fn subscribe_to_updates(&self) -> RedisResult<tokio::sync::mpsc::Receiver<String>> {
         let updates_channel = self.get_updates_channel();
+        let redis_url = self.redis_url.clone();
         let (tx, rx) = tokio::sync::mpsc::channel(100);
 
         tokio::spawn(async move {
             loop {
-                let client = Client::open("redis://127.0.0.1/");
+                let client = Client::open(&*redis_url);
                 let Some(client) = client.ok() else {
                     warn!("Failed to create Redis client, retrying...");
                     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;

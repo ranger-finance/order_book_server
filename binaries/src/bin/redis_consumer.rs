@@ -123,15 +123,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .redis_url
         .or_else(|| std::env::var("REDIS_URL").ok())
         .expect("Redis URL must be provided via --redis-url or REDIS_URL env var");
-
     let addr: SocketAddr = format!("{}:{}", args.address, args.port).parse()?;
 
     println!("Starting WebSocket server on {}", addr);
     println!("Connecting to Redis at {}", redis_url);
 
-    let redis_config = RedisConfig::from_url(redis_url);
+    let redis_config = RedisConfig::from_url(redis_url.clone());
     let pool = redis_config.create_pool().await?;
-    let redis_consumer = Arc::new(RedisConsumer::new(pool, "l2".to_string()).await);
+    let redis_consumer = Arc::new(RedisConsumer::new(pool, "orderbook".to_string(), redis_url.clone()).await);
     let client_manager = Arc::new(RwLock::new(ClientManager::new()));
 
     let mut update_rx = redis_consumer.subscribe_to_updates().await?;
@@ -176,7 +175,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (client_tx, mut client_rx) = mpsc::channel(100);
         let client_id = format!("client_{}", client_counter);
         client_counter += 1;
-
         {
             let mut manager = client_manager.write().await;
             manager.add_client(client_id.clone(), client_tx.clone());
@@ -189,7 +187,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let client_id = client_id.clone();
             let manager_for_task = Arc::clone(&manager_for_task);
             let consumer_for_task = Arc::clone(&consumer_for_task);
-
             loop {
                 tokio::select! {
                     Some(msg) = client_rx.recv() => {
@@ -213,6 +210,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     if let Ok(json) = serde_json::to_string(&response) {
                                                         drop(write.send(Message::Text(json.into())).await);
                                                     }
+
 
                                                     if let Ok(Some(book)) = consumer_for_task.get_l2_book(&coin).await {
                                                         let response = ServerMessage::Snapshot {
