@@ -36,6 +36,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod cache;
+pub mod config;
 pub mod l2_emitter;
 pub mod listener;
 pub mod orderbook;

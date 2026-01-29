@@ -1,6 +1,7 @@
 use crate::{
     HL_NODE, L2Emitter,
     cache::OrderBookCache,
+    config::StreamingConfig,
     listener::directory::DirectoryListener,
     orderbook::{
         Coin, Snapshot,
@@ -198,6 +199,8 @@ fn fetch_snapshot(
 
 pub struct OrderBookListener {
     pub ignore_spot: bool,
+    streaming_mode: bool,
+    streaming_buffer_ms: u64,
     fill_status_file: Option<File>,
     order_status_file: Option<File>,
     order_diff_file: Option<File>,
@@ -213,10 +216,12 @@ pub struct OrderBookListener {
 }
 
 impl OrderBookListener {
-    pub fn new(
+    pub fn new_with_streaming(
         internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
         ignore_spot: bool,
         redis_publisher: Option<Arc<RedisPublisher>>,
+        streaming_mode: bool,
+        streaming_buffer_ms: Option<u64>,
     ) -> Self {
         let l2_emitter = redis_publisher.map(|publisher| {
             Arc::new(Mutex::new(L2Emitter::new_with_default_interval(OrderBookCache::default(), publisher)))
@@ -224,6 +229,8 @@ impl OrderBookListener {
 
         Self {
             ignore_spot,
+            streaming_mode,
+            streaming_buffer_ms: streaming_buffer_ms.unwrap_or(50),
             fill_status_file: None,
             order_status_file: None,
             order_diff_file: None,
@@ -235,6 +242,29 @@ impl OrderBookListener {
             order_status_cache: BatchQueue::new(),
             l2_emitter,
         }
+    }
+
+    pub fn new(
+        internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
+        ignore_spot: bool,
+        redis_publisher: Option<Arc<RedisPublisher>>,
+    ) -> Self {
+        Self::new_with_streaming(internal_message_tx, ignore_spot, redis_publisher, false, None)
+    }
+
+    pub fn new_from_env(
+        internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
+        ignore_spot: bool,
+        redis_publisher: Option<Arc<RedisPublisher>>,
+    ) -> Self {
+        let config = StreamingConfig::from_env();
+        Self::new_with_streaming(
+            internal_message_tx,
+            ignore_spot,
+            redis_publisher,
+            config.streaming_mode,
+            Some(config.streaming_buffer_ms),
+        )
     }
 
     fn clone_state(&self) -> Option<OrderBookState> {
@@ -318,6 +348,10 @@ impl OrderBookListener {
             }
         }
         Ok(())
+    }
+
+    fn receive_incremental(&mut self, updates: EventBatch, _event_source: EventSource) -> Result<()> {
+        self.receive_batch(updates)
     }
 
     fn begin_caching(&mut self) {
@@ -460,24 +494,34 @@ impl DirectoryListener for OrderBookListener {
             let (height, event_batch) = match res {
                 Ok(data) => data,
                 Err(err) => {
-                    // if we run into a serialization error (hitting EOF), just return to last line.
-                    error!(
-                        "{event_source} serialization error {err}, height: {:?}, line: {:?}",
-                        self.order_book_state.as_ref().map(OrderBookState::height),
-                        &line[..100],
-                    );
-                    #[allow(clippy::unwrap_used)]
-                    let total_len: i64 = total_len.try_into().unwrap();
-                    self.file_mut(event_source).as_mut().map(|f| f.seek_relative(-total_len));
-                    break;
+                    if self.streaming_mode {
+                        continue;
+                    } else {
+                        error!(
+                            "{event_source} serialization error {err}, height: {:?}, line: {:?}",
+                            self.order_book_state.as_ref().map(OrderBookState::height),
+                            &line[..100],
+                        );
+                        #[allow(clippy::unwrap_used)]
+                        let total_len: i64 = total_len.try_into().unwrap();
+                        self.file_mut(event_source).as_mut().map(|f| f.seek_relative(-total_len));
+                        break;
+                    }
                 }
             };
             if height % 100 == 0 {
                 info!("{event_source} block: {height}");
             }
-            if let Err(err) = self.receive_batch(event_batch) {
-                self.order_book_state = None;
-                return Err(err);
+            if self.streaming_mode {
+                if let Err(err) = self.receive_incremental(event_batch, event_source) {
+                    self.order_book_state = None;
+                    return Err(err);
+                }
+            } else {
+                if let Err(err) = self.receive_batch(event_batch) {
+                    self.order_book_state = None;
+                    return Err(err);
+                }
             }
         }
         let snapshot = self.l2_snapshots(true);
