@@ -10,6 +10,7 @@ use crate::{
     types::{
         inner::{InnerL4Order, InnerOrderDiff},
         node_data::{Batch, NodeDataOrderDiff, NodeDataOrderStatus},
+        L2Book, Level,
     },
 };
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -65,6 +66,16 @@ impl OrderBookState {
 
     pub fn compute_universe(&self) -> HashSet<Coin> {
         self.order_book.as_ref().keys().cloned().collect()
+    }
+
+    pub fn get_l2_book(&self, coin: &Coin, max_levels: usize) -> Option<L2Book> {
+        if let Some(order_book) = self.order_book.as_ref().get(coin) {
+            let snapshot = order_book.to_l2_snapshot(Some(max_levels), None, None);
+            let levels: [Vec<Level>; 2] = snapshot.export_inner_snapshot();
+            Some(L2Book::from_l2_snapshot(coin.value(), levels, self.height))
+        } else {
+            None
+        }
     }
 
     pub fn apply_updates(
