@@ -39,6 +39,7 @@ pub mod cache;
 pub mod config;
 pub mod l2_emitter;
 pub mod listener;
+pub mod metrics;
 pub mod orderbook;
 mod prelude;
 pub mod redis;
