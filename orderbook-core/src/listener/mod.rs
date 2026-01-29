@@ -3,6 +3,7 @@ use crate::{
     cache::OrderBookCache,
     config::StreamingConfig,
     listener::directory::DirectoryListener,
+    metrics::StreamingMetrics,
     orderbook::{
         Coin, Snapshot,
         multi_book::{Snapshots, load_snapshots_from_json},
@@ -206,16 +207,17 @@ pub struct OrderBookListener {
     fill_status_file: Option<File>,
     order_status_file: Option<File>,
     order_diff_file: Option<File>,
-    // None if we haven't seen a valid snapshot yet
     order_book_state: Option<OrderBookState>,
     last_fill: Option<u64>,
     order_diff_cache: BatchQueue<NodeDataOrderDiff>,
     order_status_cache: BatchQueue<NodeDataOrderStatus>,
-    // Only Some when we want it to collect updates
     fetched_snapshot_cache: Option<VecDeque<(Batch<NodeDataOrderStatus>, Batch<NodeDataOrderDiff>)>>,
     internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
     l2_emitter: Option<Arc<Mutex<L2Emitter>>>,
     event_buffer: EventBuffer,
+    affected_coins: HashSet<Coin>,
+    pending_l2_coins: Vec<Coin>,
+    streaming_metrics: StreamingMetrics,
 }
 
 impl OrderBookListener {
@@ -227,7 +229,13 @@ impl OrderBookListener {
         streaming_buffer_ms: Option<u64>,
     ) -> Self {
         let l2_emitter = redis_publisher.map(|publisher| {
-            Arc::new(Mutex::new(L2Emitter::new_with_default_interval(OrderBookCache::default(), publisher)))
+            Arc::new(Mutex::new(L2Emitter::new(
+                OrderBookCache::default(),
+                publisher,
+                100,
+                streaming_mode,
+                streaming_buffer_ms,
+            )))
         });
 
         let buffer_window_ms = streaming_buffer_ms.unwrap_or(50);
@@ -247,6 +255,9 @@ impl OrderBookListener {
             order_status_cache: BatchQueue::new(),
             l2_emitter,
             event_buffer: EventBuffer::new(buffer_window_ms),
+            affected_coins: HashSet::new(),
+            pending_l2_coins: Vec::new(),
+            streaming_metrics: StreamingMetrics::new(),
         }
     }
 
@@ -357,6 +368,7 @@ impl OrderBookListener {
     }
 
     fn receive_incremental(&mut self, updates: EventBatch, _event_source: EventSource) -> Result<()> {
+        let _file_time = Instant::now();
         match updates {
             EventBatch::Orders(batch) => {
                 let block_number = batch.block_number();
@@ -377,14 +389,22 @@ impl OrderBookListener {
             }
         }
 
+        self.streaming_metrics.update_buffer_sizes(
+            self.event_buffer.status_count(),
+            self.event_buffer.diff_count()
+        );
+
         self.try_process_buffered_events()?;
         self.event_buffer.flush_old_events();
+
+        self.maybe_log_metrics();
 
         Ok(())
     }
 
     fn try_process_buffered_events(&mut self) -> Result<()> {
         let matched = self.event_buffer.try_match_events();
+        self.streaming_metrics.record_matched(matched.len());
 
         if !matched.is_empty() {
             info!("Matched {} events from buffer", matched.len());
@@ -411,6 +431,7 @@ impl OrderBookListener {
             );
 
             if let Some(state) = &mut self.order_book_state {
+                let coin = status.order.coin.clone();
                 match state.apply_single_update(apply_status_batch, apply_diff_batch.clone()) {
                     Ok(()) => {
                         if let Some(cache) = &mut self.fetched_snapshot_cache {
@@ -444,6 +465,7 @@ impl OrderBookListener {
                                 let _unused = tx.send(updates);
                             });
                         }
+                        self.affected_coins.insert(Coin::new(&coin));
                     }
                     Err(err) => {
                         error!("Error applying incremental update: {}", err);
@@ -452,6 +474,10 @@ impl OrderBookListener {
                     }
                 }
             }
+        }
+
+        if self.streaming_mode && !self.affected_coins.is_empty() {
+            self.pending_l2_coins.extend(self.affected_coins.drain());
         }
 
         Ok(())
@@ -495,6 +521,38 @@ impl OrderBookListener {
         self.order_book_state.as_mut().and_then(|o| o.l2_snapshots(prevent_future_snaps))
     }
 
+    fn process_pending_l2_updates(&mut self) {
+        if self.pending_l2_coins.is_empty() {
+            return;
+        }
+
+        let coins: Vec<Coin> = self.pending_l2_coins.drain(..).collect();
+        let block_height = self.order_book_state.as_ref().map_or(0, |s| s.height());
+        let max_levels = 100;
+
+        if let Some(state) = &self.order_book_state {
+            if let Some(ref l2_emitter) = self.l2_emitter {
+                let emitter_arc = l2_emitter.clone();
+                let l2_books: Vec<(Coin, L2Book)> = coins
+                    .iter()
+                    .filter_map(|coin| state.get_l2_book(coin, max_levels).map(|book| (coin.clone(), book)))
+                    .collect();
+
+                tokio::spawn(async move {
+                    let mut emitter = emitter_arc.lock().await;
+                    for (coin, book) in l2_books {
+                        if !ALLOWED_COINS.contains(&coin.value().as_str()) {
+                            continue;
+                        }
+                        if let Err(err) = emitter.process_coin_incremental(&coin, &book, block_height).await {
+                            error!("Failed to publish incremental L2 data to Redis: {err}");
+                        }
+                    }
+                });
+            }
+        }
+    }
+
     fn emit_and_publish_l2(&mut self, snapshot: (u64, L2Snapshots)) {
         let block_height = snapshot.0;
         let l2_snapshots = snapshot.1.clone();
@@ -519,6 +577,14 @@ impl OrderBookListener {
                     }
                 }
             });
+        }
+    }
+}
+
+impl OrderBookListener {
+    fn maybe_log_metrics(&mut self) {
+        if self.streaming_metrics.total_events() % 100 == 0 && self.streaming_metrics.total_events() > 0 {
+            info!("{}", self.streaming_metrics.format_report());
         }
     }
 }
@@ -640,7 +706,10 @@ impl DirectoryListener for OrderBookListener {
                 });
             }
             self.emit_and_publish_l2((time, l2_snapshots));
+            self.streaming_metrics.record_l2_update();
         }
+        self.process_pending_l2_updates();
+
         Ok(())
     }
 }
