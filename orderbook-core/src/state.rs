@@ -143,4 +143,89 @@ impl OrderBookState {
 
         Ok(())
     }
+
+    pub fn apply_single_update(
+        &mut self,
+        order_status: Batch<NodeDataOrderStatus>,
+        order_diff: Batch<NodeDataOrderDiff>,
+    ) -> Result<()> {
+        let height = order_status.block_number();
+        let time = order_status.block_time();
+
+        assert_eq!(order_status.block_number(), order_diff.block_number());
+
+        if height > self.height + 1 {
+            return Err(format!("Expecting block {}, got block {} (too far ahead)", self.height + 1, height).into());
+        } else if height == self.height {
+            self.apply_updates_internal(order_status, order_diff, false)?;
+        } else if height == self.height + 1 {
+            self.apply_updates_internal(order_status, order_diff, true)?;
+            self.height = height;
+            self.time = time;
+        } else {
+            info!("Already at block {}, ignoring block {}", self.height, height);
+        }
+
+        Ok(())
+    }
+
+    fn apply_updates_internal(
+        &mut self,
+        order_statuses: Batch<NodeDataOrderStatus>,
+        order_diffs: Batch<NodeDataOrderDiff>,
+        increment_height: bool,
+    ) -> Result<()> {
+        let mut diffs = order_diffs.events().into_iter().collect::<VecDeque<_>>();
+        let mut order_map = order_statuses
+            .events()
+            .into_iter()
+            .filter_map(|order_status| {
+                if order_status.is_inserted_into_book() {
+                    Some((Oid::new(order_status.order.oid), order_status))
+                } else {
+                    None
+                }
+            })
+            .collect::<HashMap<_, _>>();
+
+        while let Some(diff) = diffs.pop_front() {
+            let oid = diff.oid();
+            let coin = diff.coin();
+            if coin.is_spot() && self.ignore_spot {
+                continue;
+            }
+            let inner_diff = diff.diff().try_into()?;
+            match inner_diff {
+                InnerOrderDiff::New { sz } => {
+                    if let Some(order) = order_map.remove(&oid) {
+                        let time = order.time.and_utc().timestamp_millis();
+                        let mut inner_order: InnerL4Order = order.try_into()?;
+                        inner_order.modify_sz(sz);
+                        #[allow(clippy::unwrap_used)]
+                        inner_order.convert_trigger(time.try_into().unwrap());
+                        self.order_book.add_order(inner_order);
+                    } else {
+                        error!("Unable to find order opening status {:?}", diff);
+                    }
+                }
+                InnerOrderDiff::Update { new_sz, .. } => {
+                    if !self.order_book.modify_sz(oid, coin, new_sz) {
+                        error!("Unable to find order on the book {:?}", diff);
+                    }
+                }
+                InnerOrderDiff::Remove => {
+                    if !self.order_book.cancel_order(oid, coin) {
+                        error!("Unable to find order on the book {:?}", diff);
+                    }
+                }
+            }
+        }
+
+        if increment_height {
+            self.snapped = false;
+            info!("Block height now at {}", self.height);
+        }
+
+        Ok(())
+    }
 }

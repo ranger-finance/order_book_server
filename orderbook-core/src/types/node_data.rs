@@ -76,6 +76,10 @@ pub struct Batch<E> {
 }
 
 impl<E> Batch<E> {
+    pub fn new(local_time: NaiveDateTime, block_time: NaiveDateTime, block_number: u64, events: Vec<E>) -> Self {
+        Self { local_time, block_time, block_number, events }
+    }
+
     #[allow(clippy::unwrap_used)]
     pub fn block_time(&self) -> u64 {
         self.block_time.and_utc().timestamp_millis().try_into().unwrap()
@@ -87,5 +91,13 @@ impl<E> Batch<E> {
 
     pub fn events(self) -> Vec<E> {
         self.events
+    }
+
+    pub const fn block_time_datetime(&self) -> &NaiveDateTime {
+        &self.block_time
+    }
+
+    pub const fn local_time(&self) -> &NaiveDateTime {
+        &self.local_time
     }
 }

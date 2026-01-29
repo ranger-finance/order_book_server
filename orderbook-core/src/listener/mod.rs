@@ -42,9 +42,11 @@ const ALLOWED_COINS: &[&str] = &["BTC", "ETH", "SOL"];
 
 pub mod cleanup;
 pub mod directory;
+pub mod event_buffer;
 pub mod utils;
 
 pub use cleanup::perform_cleanup;
+pub use event_buffer::EventBuffer;
 
 // WARNING - this code assumes no other file system operations are occurring in the watched directories
 // if there are scripts running, this may not work as intended
@@ -213,6 +215,7 @@ pub struct OrderBookListener {
     fetched_snapshot_cache: Option<VecDeque<(Batch<NodeDataOrderStatus>, Batch<NodeDataOrderDiff>)>>,
     internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
     l2_emitter: Option<Arc<Mutex<L2Emitter>>>,
+    event_buffer: EventBuffer,
 }
 
 impl OrderBookListener {
@@ -227,10 +230,12 @@ impl OrderBookListener {
             Arc::new(Mutex::new(L2Emitter::new_with_default_interval(OrderBookCache::default(), publisher)))
         });
 
+        let buffer_window_ms = streaming_buffer_ms.unwrap_or(50);
+
         Self {
             ignore_spot,
             streaming_mode,
-            streaming_buffer_ms: streaming_buffer_ms.unwrap_or(50),
+            streaming_buffer_ms: buffer_window_ms,
             fill_status_file: None,
             order_status_file: None,
             order_diff_file: None,
@@ -241,6 +246,7 @@ impl OrderBookListener {
             order_diff_cache: BatchQueue::new(),
             order_status_cache: BatchQueue::new(),
             l2_emitter,
+            event_buffer: EventBuffer::new(buffer_window_ms),
         }
     }
 
@@ -351,7 +357,104 @@ impl OrderBookListener {
     }
 
     fn receive_incremental(&mut self, updates: EventBatch, _event_source: EventSource) -> Result<()> {
-        self.receive_batch(updates)
+        match updates {
+            EventBatch::Orders(batch) => {
+                let block_number = batch.block_number();
+                let block_time = batch.block_time_datetime().clone();
+                for status in batch.events() {
+                    self.event_buffer.add_order_status(block_number, block_time.clone(), status);
+                }
+            }
+            EventBatch::BookDiffs(batch) => {
+                let block_number = batch.block_number();
+                let block_time = batch.block_time_datetime().clone();
+                for diff in batch.events() {
+                    self.event_buffer.add_order_diff(block_number, block_time.clone(), diff);
+                }
+            }
+            EventBatch::Fills(batch) => {
+                return self.receive_batch(EventBatch::Fills(batch));
+            }
+        }
+
+        self.try_process_buffered_events()?;
+        self.event_buffer.flush_old_events();
+
+        Ok(())
+    }
+
+    fn try_process_buffered_events(&mut self) -> Result<()> {
+        let matched = self.event_buffer.try_match_events();
+
+        if !matched.is_empty() {
+            info!("Matched {} events from buffer", matched.len());
+        }
+
+        for (status_with_meta, diff_with_meta) in matched {
+            let block_number = status_with_meta.block_number;
+            let block_time = status_with_meta.block_time.clone();
+            let local_time = status_with_meta.local_time.clone();
+            let status = status_with_meta.status;
+            let diff = diff_with_meta.diff;
+
+            let apply_status_batch = Batch::new(
+                local_time.clone(),
+                block_time.clone(),
+                block_number,
+                vec![status.clone()],
+            );
+            let apply_diff_batch = Batch::new(
+                local_time.clone(),
+                block_time.clone(),
+                block_number,
+                vec![diff.clone()],
+            );
+
+            if let Some(state) = &mut self.order_book_state {
+                match state.apply_single_update(apply_status_batch, apply_diff_batch.clone()) {
+                    Ok(()) => {
+                        if let Some(cache) = &mut self.fetched_snapshot_cache {
+                            let cache_status_batch = Batch::new(
+                                local_time.clone(),
+                                block_time.clone(),
+                                block_number,
+                                vec![status.clone()],
+                            );
+                            cache.push_back((cache_status_batch, apply_diff_batch));
+                        }
+                        if let Some(tx) = &self.internal_message_tx {
+                            let message_status_batch = Batch::new(
+                                local_time.clone(),
+                                block_time.clone(),
+                                block_number,
+                                vec![status],
+                            );
+                            let message_diff_batch = Batch::new(
+                                local_time,
+                                block_time,
+                                block_number,
+                                vec![diff],
+                            );
+                            let updates = Arc::new(InternalMessage::L4BookUpdates {
+                                diff_batch: message_diff_batch,
+                                status_batch: message_status_batch,
+                            });
+                            let tx = tx.clone();
+                            tokio::spawn(async move {
+                                let _unused = tx.send(updates);
+                            });
+                        }
+                    }
+                    Err(err) => {
+                        error!("Error applying incremental update: {}", err);
+                        self.order_book_state = None;
+                        return Err(err);
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn begin_caching(&mut self) {
