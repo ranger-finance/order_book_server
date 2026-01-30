@@ -394,10 +394,6 @@ impl OrderBookListener {
         let matched = self.event_buffer.try_match_events();
         self.streaming_metrics.record_matched(matched.len());
 
-        if !matched.is_empty() {
-            info!("Matched {} events from buffer", matched.len());
-        }
-
         for (status_with_meta, diff_with_meta) in matched {
             let block_number = status_with_meta.block_number;
             let block_time = status_with_meta.block_time.clone();
@@ -411,6 +407,17 @@ impl OrderBookListener {
 
             if let Some(state) = &mut self.order_book_state {
                 let coin = status.order.coin.clone();
+                let current_height = state.height();
+                let update_height = block_number;
+                
+                if update_height > current_height + 1 {
+                    info!("Gap detected: current height {}, update height {}. Triggering snapshot refetch.", 
+                          current_height, update_height);
+                    self.order_book_state = None;
+                    self.fetched_snapshot_cache = None;
+                    continue;
+                }
+                
                 match state.apply_single_update(apply_status_batch, apply_diff_batch.clone()) {
                     Ok(()) => {
                         if let Some(cache) = &mut self.fetched_snapshot_cache {
@@ -462,15 +469,38 @@ impl OrderBookListener {
         info!("No existing snapshot");
         let mut new_order_book = OrderBookState::from_snapshot(snapshot, height, 0, true, self.ignore_spot);
         let mut retry = false;
-        while let Some((order_statuses, order_diffs)) = self.pop_cache() {
-            if new_order_book.apply_updates(order_statuses, order_diffs).is_err() {
-                info!(
-                    "Failed to apply updates to this book (likely missing older updates). Waiting for next snapshot."
-                );
-                retry = true;
-                break;
+
+        if let Some(ref mut cache) = self.fetched_snapshot_cache {
+            while let Some((order_statuses, order_diffs)) = cache.pop_front() {
+                let update_height = order_statuses.block_number();
+                if update_height > new_order_book.height() + 1 {
+                    info!("Update at block {} is too far ahead of snapshot at block {}, waiting for newer snapshot",
+                          update_height, new_order_book.height());
+                    retry = true;
+                    break;
+                }
+                if new_order_book.apply_updates(order_statuses, order_diffs).is_err() {
+                    info!(
+                        "Failed to apply updates to this book (likely missing older updates). Waiting for next snapshot."
+                    );
+                    retry = true;
+                    break;
+                }
             }
         }
+
+        if !retry {
+            while let Some((order_statuses, order_diffs)) = self.pop_cache() {
+                if new_order_book.apply_updates(order_statuses, order_diffs).is_err() {
+                    info!(
+                        "Failed to apply updates to this book (likely missing older updates). Waiting for next snapshot."
+                    );
+                    retry = true;
+                    break;
+                }
+            }
+        }
+
         if !retry {
             self.order_book_state = Some(new_order_book);
             info!("Order book ready");
@@ -676,6 +706,7 @@ impl DirectoryListener for OrderBookListener {
                     self.order_book_state = None;
                     return Err(err);
                 }
+                self.process_pending_l2_updates();
             } else {
                 if let Err(err) = self.receive_batch(event_batch) {
                     self.order_book_state = None;
