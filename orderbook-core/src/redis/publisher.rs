@@ -1,10 +1,9 @@
-use crate::orderbook::Coin;
-use crate::types::L2Book;
 use bb8_redis::{
     RedisConnectionManager,
     bb8::{Pool, PooledConnection, RunError},
     redis::{AsyncCommands, RedisError, RedisResult, cmd},
 };
+use orderbook_normaliser::models::{Exchange, UnifiedOrderbook};
 use std::io;
 use std::sync::Arc;
 
@@ -20,14 +19,19 @@ impl RedisPublisher {
         Self { pool, key_prefix }
     }
 
-    /// Get the Redis key for a coin's orderbook
-    fn get_orderbook_key(&self, coin: &Coin) -> String {
-        format!("{}:orderbook:{}", self.key_prefix, coin.value())
+    /// Get the Redis key for an orderbook (includes exchange and symbol)
+    fn get_orderbook_key(&self, exchange: Exchange, symbol: &str) -> String {
+        format!("{}:orderbook:{}:{}", self.key_prefix, exchange.as_str(), symbol)
     }
 
-    /// Publish an orderbook snapshot to Redis with TTL (default: 1 hour)
-    pub async fn publish_l2_book(&self, coin: &Coin, book: &L2Book) -> RedisResult<()> {
-        let key = self.get_orderbook_key(coin);
+    /// Publish a unified orderbook snapshot to Redis with TTL (default: 1 hour)
+    pub async fn publish_orderbook(
+        &self,
+        exchange: Exchange,
+        symbol: &str,
+        book: &UnifiedOrderbook,
+    ) -> RedisResult<()> {
+        let key = self.get_orderbook_key(exchange, symbol);
         let serialized = serde_json::to_string(book).map_err(|e| {
             RedisError::from(io::Error::new(io::ErrorKind::Other, format!("Serialization error: {}", e)))
         })?;
@@ -43,8 +47,8 @@ impl RedisPublisher {
     }
 
     /// Get an orderbook from Redis (for testing/validation)
-    pub async fn get_l2_book(&self, coin: &Coin) -> RedisResult<Option<L2Book>> {
-        let key = self.get_orderbook_key(coin);
+    pub async fn get_orderbook(&self, exchange: Exchange, symbol: &str) -> RedisResult<Option<UnifiedOrderbook>> {
+        let key = self.get_orderbook_key(exchange, symbol);
 
         let mut conn: PooledConnection<'_, RedisConnectionManager> =
             self.pool.get().await.map_err(|e: RunError<RedisError>| {
@@ -55,7 +59,7 @@ impl RedisPublisher {
 
         match result {
             Some(json) => {
-                let deserialized: L2Book = serde_json::from_str(&json).map_err(|e| {
+                let deserialized: UnifiedOrderbook = serde_json::from_str(&json).map_err(|e| {
                     RedisError::from(io::Error::new(io::ErrorKind::Other, format!("Deserialization error: {}", e)))
                 })?;
                 Ok(Some(deserialized))
@@ -65,15 +69,16 @@ impl RedisPublisher {
     }
 
     /// Publish an update notification to Redis pub/sub
-    pub async fn publish_update_notification(&self, coin: &str) -> RedisResult<()> {
+    pub async fn publish_update_notification(&self, exchange: Exchange, symbol: &str) -> RedisResult<()> {
         let channel = format!("{}:updates", self.key_prefix);
+        let message = format!("{}:{}", exchange.as_str(), symbol);
 
         let mut conn: PooledConnection<'_, RedisConnectionManager> =
             self.pool.get().await.map_err(|e: RunError<RedisError>| {
                 RedisError::from(io::Error::new(io::ErrorKind::Other, format!("Pool error: {}", e)))
             })?;
 
-        conn.publish::<_, _, ()>(channel, coin).await?;
+        conn.publish::<_, _, ()>(channel, message).await?;
 
         Ok(())
     }

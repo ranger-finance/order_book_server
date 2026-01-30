@@ -2,13 +2,12 @@ use axum::{Router, response::IntoResponse, routing::get};
 use futures_util::{SinkExt, StreamExt};
 use log::{error, info};
 use orderbook_core::{
-    L2Book, L4Book, L4BookUpdates, L4Order, Trade, RedisPublisher,
+    L2Book, L4Book, L4BookUpdates, L4Order, RedisConfig, RedisPublisher, Trade, UnifiedOrderbook,
     internal::{
         Coin, InnerLevel, InternalMessage, L2SnapshotParams, L2Snapshots, OrderBookListener, Snapshot, TimedSnapshots,
         hl_listen,
     },
     types::node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
-    RedisConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -97,7 +96,7 @@ impl Subscription {
 #[serde(rename_all = "camelCase")]
 enum ServerResponse {
     SubscriptionResponse(ClientMessage),
-    L2Book(L2Book),
+    L2Book(UnifiedOrderbook),
     L4Book(L4Book),
     Trades(Vec<Trade>),
     Error(String),
@@ -380,10 +379,17 @@ async fn send_ws_data_from_snapshot(
         {
             let n_levels = n_levels.unwrap_or(DEFAULT_LEVELS);
             let snapshot = snapshot.truncate(n_levels);
-            let snapshot = snapshot.export_inner_snapshot();
-            let l2_book = L2Book::from_l2_snapshot(coin.clone(), snapshot, time);
-            let msg = ServerResponse::L2Book(l2_book);
-            send_socket_message(socket, msg).await;
+            let levels = snapshot.export_inner_snapshot();
+            let l2_book = L2Book::from_l2_snapshot(coin.clone(), levels, time);
+            match l2_book.to_unified(coin) {
+                Ok(unified_book) => {
+                    let msg = ServerResponse::L2Book(unified_book);
+                    send_socket_message(socket, msg).await;
+                }
+                Err(err) => {
+                    error!("Failed to convert L2Book to UnifiedOrderbook: {}", err);
+                }
+            }
         } else {
             error!("Coin {coin} not found");
         }
