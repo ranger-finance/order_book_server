@@ -23,6 +23,23 @@ pub enum Exchange {
     Drift,
 }
 
+impl Exchange {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Exchange::Hyperliquid => "hyperliquid",
+            Exchange::Drift => "drift",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Result<Self, String> {
+        match s.to_lowercase().as_str() {
+            "hyperliquid" => Ok(Exchange::Hyperliquid),
+            "drift" => Ok(Exchange::Drift),
+            _ => Err(format!("Unknown exchange: {}", s)),
+        }
+    }
+}
+
 /// Serialize BTreeMap as Vec<PriceLevel> in ascending order (for asks)
 fn serialize_asks<S>(map: &BTreeMap<Decimal, Decimal>, serializer: S) -> Result<S::Ok, S::Error>
 where

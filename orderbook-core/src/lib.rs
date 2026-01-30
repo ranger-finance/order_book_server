@@ -19,7 +19,7 @@
 //!
 //!     while let Ok(event) = receiver.recv().await {
 //!         match event {
-//!             StreamEvent::OrderbookSnapshot { symbol, book, .. } => {
+//!             StreamEvent::OrderbookSnapshot(book) => {
 //!                 println!("Orderbook update for {symbol}: {} bids, {} asks", book.bids.len(), book.asks.len());
 //!             }
 //!             StreamEvent::Ready => {
@@ -46,7 +46,7 @@ mod stream;
 pub mod types;
 
 // Re-export unified orderbook types
-pub use orderbook_normaliser::models::{Exchange, UnifiedOrderbook, PriceLevel};
+pub use orderbook_normaliser::models::{Exchange, PriceLevel, UnifiedOrderbook};
 
 pub const HL_NODE: &str = "hl-node";
 

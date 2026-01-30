@@ -1,27 +1,17 @@
 use crate::{
     listener::{OrderBookListener, hl_listen},
-    types::{
-        Level,
-        node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
-    },
+    types::node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
 };
-use std::{
-    collections::HashSet,
-    path::PathBuf,
-    sync::Arc,
-};
-use tokio::sync::{broadcast, Mutex};
+use orderbook_normaliser::models::UnifiedOrderbook;
+use std::{collections::HashSet, path::PathBuf, sync::Arc};
+use tokio::sync::{Mutex, broadcast};
 
 /// Events emitted by the orderbook stream
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
-    /// L2 orderbook snapshot for a coin
-    L2Snapshot {
-        coin: String,
-        time: u64,
-        bids: Vec<Level>,
-        asks: Vec<Level>,
-    },
+    /// Unified orderbook snapshot for a symbol
+    OrderbookSnapshot(UnifiedOrderbook),
+
     /// L4 book updates (order-level)
     L4Update {
         coin: String,
@@ -31,9 +21,7 @@ pub enum StreamEvent {
         book_diffs: Vec<NodeDataOrderDiff>,
     },
     /// Raw fill batch
-    Fill {
-        batch: Batch<NodeDataFill>,
-    },
+    Fill { batch: Batch<NodeDataFill> },
     /// Stream is ready (initial snapshot available)
     Ready,
     /// Error occurred
@@ -82,45 +70,37 @@ impl OrderBookStream {
         let listener = OrderBookListener::new(None, config.ignore_spot, None);
         let listener = Arc::new(Mutex::new(listener));
 
-        Ok(Self {
-            config,
-            listener,
-            event_tx,
-        })
+        Ok(Self { config, listener, event_tx })
     }
-    
+
     /// Start the stream (spawns background listener task)
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let listener = self.listener.clone();
         let data_dir = self.config.data_dir.clone();
         let event_tx = self.event_tx.clone();
-        
+
         tokio::spawn(async move {
             if let Err(err) = hl_listen(listener, data_dir).await {
                 log::error!("OrderBookStream listener error: {err}");
                 let _unused = event_tx.send(StreamEvent::Error(err.to_string()));
             }
         });
-        
+
         Ok(())
     }
-    
+
     /// Subscribe to stream events
     pub fn subscribe(&self) -> broadcast::Receiver<StreamEvent> {
         self.event_tx.subscribe()
     }
-    
+
     /// Check if the stream is ready (has received initial snapshot)
     pub async fn is_ready(&self) -> bool {
         self.listener.lock().await.is_ready()
     }
-    
+
     /// Get the universe of available coins
     pub async fn get_universe(&self) -> HashSet<String> {
-        self.listener.lock().await
-            .universe()
-            .into_iter()
-            .map(|c| c.value())
-            .collect()
+        self.listener.lock().await.universe().into_iter().map(|c| c.value()).collect()
     }
 }
