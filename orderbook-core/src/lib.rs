@@ -19,8 +19,8 @@
 //!
 //!     while let Ok(event) = receiver.recv().await {
 //!         match event {
-//!             StreamEvent::L2Snapshot { coin, bids, asks, .. } => {
-//!                 println!("L2 update for {coin}: {} bids, {} asks", bids.len(), asks.len());
+//!             StreamEvent::OrderbookSnapshot { symbol, book, .. } => {
+//!                 println!("Orderbook update for {symbol}: {} bids, {} asks", book.bids.len(), book.asks.len());
 //!             }
 //!             StreamEvent::Ready => {
 //!                 println!("Stream ready!");
@@ -45,6 +45,9 @@ mod state;
 mod stream;
 pub mod types;
 
+// Re-export unified orderbook types
+pub use orderbook_normaliser::models::{Exchange, UnifiedOrderbook, PriceLevel};
+
 pub const HL_NODE: &str = "hl-node";
 
 // Re-export main interface
@@ -53,13 +56,16 @@ pub use stream::{OrderBookStream, StreamConfig, StreamEvent};
 // Re-export L2Emitter for external use
 pub use l2_emitter::L2Emitter;
 
+// Re-export cache types
+pub use cache::{OrderBookCache, OrderBookKey};
+
 // Re-export Redis modules
 pub use redis::{RedisConfig, RedisPublisher};
 
 // Re-export types for consumers who need them
 pub use types::{
-    node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
     Fill, L2Book, L4Book, L4BookUpdates, L4Order, Level, OrderDiff, Trade,
+    node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
 };
 
 pub use orderbook::{Coin, Px, Side, Sz};
