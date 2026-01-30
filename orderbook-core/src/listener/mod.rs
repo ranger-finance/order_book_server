@@ -389,10 +389,7 @@ impl OrderBookListener {
             }
         }
 
-        self.streaming_metrics.update_buffer_sizes(
-            self.event_buffer.status_count(),
-            self.event_buffer.diff_count()
-        );
+        self.streaming_metrics.update_buffer_sizes(self.event_buffer.status_count(), self.event_buffer.diff_count());
 
         self.try_process_buffered_events()?;
         self.event_buffer.flush_old_events();
@@ -417,45 +414,23 @@ impl OrderBookListener {
             let status = status_with_meta.status;
             let diff = diff_with_meta.diff;
 
-            let apply_status_batch = Batch::new(
-                local_time.clone(),
-                block_time.clone(),
-                block_number,
-                vec![status.clone()],
-            );
-            let apply_diff_batch = Batch::new(
-                local_time.clone(),
-                block_time.clone(),
-                block_number,
-                vec![diff.clone()],
-            );
+            let apply_status_batch =
+                Batch::new(local_time.clone(), block_time.clone(), block_number, vec![status.clone()]);
+            let apply_diff_batch = Batch::new(local_time.clone(), block_time.clone(), block_number, vec![diff.clone()]);
 
             if let Some(state) = &mut self.order_book_state {
                 let coin = status.order.coin.clone();
                 match state.apply_single_update(apply_status_batch, apply_diff_batch.clone()) {
                     Ok(()) => {
                         if let Some(cache) = &mut self.fetched_snapshot_cache {
-                            let cache_status_batch = Batch::new(
-                                local_time.clone(),
-                                block_time.clone(),
-                                block_number,
-                                vec![status.clone()],
-                            );
+                            let cache_status_batch =
+                                Batch::new(local_time.clone(), block_time.clone(), block_number, vec![status.clone()]);
                             cache.push_back((cache_status_batch, apply_diff_batch));
                         }
                         if let Some(tx) = &self.internal_message_tx {
-                            let message_status_batch = Batch::new(
-                                local_time.clone(),
-                                block_time.clone(),
-                                block_number,
-                                vec![status],
-                            );
-                            let message_diff_batch = Batch::new(
-                                local_time,
-                                block_time,
-                                block_number,
-                                vec![diff],
-                            );
+                            let message_status_batch =
+                                Batch::new(local_time.clone(), block_time.clone(), block_number, vec![status]);
+                            let message_diff_batch = Batch::new(local_time, block_time, block_number, vec![diff]);
                             let updates = Arc::new(InternalMessage::L4BookUpdates {
                                 diff_batch: message_diff_batch,
                                 status_batch: message_status_batch,
@@ -544,8 +519,18 @@ impl OrderBookListener {
                         if !ALLOWED_COINS.contains(&coin.value().as_str()) {
                             continue;
                         }
-                        if let Err(err) = emitter.process_coin_incremental(&coin, &book, block_height).await {
-                            error!("Failed to publish incremental L2 data to Redis: {err}");
+
+                        match book.to_unified(&coin.value()) {
+                            Ok(unified_book) => {
+                                if let Err(err) =
+                                    emitter.process_coin_incremental(&coin.value(), &unified_book, block_height).await
+                                {
+                                    error!("Failed to publish incremental L2 data to Redis: {err}");
+                                }
+                            }
+                            Err(err) => {
+                                error!("Failed to convert L2Book to UnifiedOrderbook: {}", err);
+                            }
                         }
                     }
                 });

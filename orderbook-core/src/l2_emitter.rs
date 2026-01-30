@@ -26,9 +26,7 @@ impl L2Emitter {
         streaming_mode: bool,
         snapshot_interval_ms: Option<u64>,
     ) -> Self {
-        let snapshot_interval_ms = snapshot_interval_ms.unwrap_or_else(|| {
-            if streaming_mode { 100 } else { 1000 }
-        });
+        let snapshot_interval_ms = snapshot_interval_ms.unwrap_or_else(|| if streaming_mode { 100 } else { 1000 });
 
         Self {
             cache,
@@ -46,11 +44,7 @@ impl L2Emitter {
         Self::new_simple(cache, redis_publisher, 100)
     }
 
-    pub fn new_simple(
-        cache: OrderBookCache,
-        redis_publisher: Arc<RedisPublisher>,
-        snapshot_interval: u64,
-    ) -> Self {
+    pub fn new_simple(cache: OrderBookCache, redis_publisher: Arc<RedisPublisher>, snapshot_interval: u64) -> Self {
         Self::new(cache, redis_publisher, snapshot_interval, false, None)
     }
 
@@ -89,7 +83,12 @@ impl L2Emitter {
         Ok(())
     }
 
-    pub async fn process_coin_incremental(&mut self, symbol: &str, book: &UnifiedOrderbook, block_height: u64) -> Result<(), RedisError> {
+    pub async fn process_coin_incremental(
+        &mut self,
+        symbol: &str,
+        book: &UnifiedOrderbook,
+        block_height: u64,
+    ) -> Result<(), RedisError> {
         self.block_height = block_height;
 
         if self.should_emit_for_coin(symbol) {

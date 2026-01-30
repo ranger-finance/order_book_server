@@ -150,7 +150,6 @@ impl OrderBookState {
         self.height += 1;
         self.time = time;
         self.snapped = false;
-        info!("Block height now at {}", self.height);
 
         Ok(())
     }
@@ -234,7 +233,6 @@ impl OrderBookState {
 
         if increment_height {
             self.snapped = false;
-            info!("Block height now at {}", self.height);
         }
 
         Ok(())
