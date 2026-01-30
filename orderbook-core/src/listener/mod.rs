@@ -241,7 +241,8 @@ impl OrderBookListener {
         });
 
         let buffer_window_ms = streaming_buffer_ms.unwrap_or(50);
-        let allowed_coins = allowed_coins.unwrap_or_else(|| vec!["BTC".to_string(), "ETH".to_string(), "SOL".to_string()]);
+        let allowed_coins =
+            allowed_coins.unwrap_or_else(|| vec!["BTC".to_string(), "ETH".to_string(), "SOL".to_string()]);
 
         Self {
             ignore_spot,
@@ -496,38 +497,38 @@ impl OrderBookListener {
         let max_levels = 100;
 
         if let Some(state) = &self.order_book_state {
-        if let Some(ref l2_emitter) = self.l2_emitter {
-            let emitter_arc = l2_emitter.clone();
-            let allowed_coins = self.allowed_coins.clone();
-            let l2_books: Vec<(Coin, L2Book)> = coins
-                .iter()
-                .filter_map(|coin| state.get_l2_book(coin, max_levels).map(|book| (coin.clone(), book)))
-                .collect();
-            let max_bids = self.max_bids;
-            let max_asks = self.max_asks;
+            if let Some(ref l2_emitter) = self.l2_emitter {
+                let emitter_arc = l2_emitter.clone();
+                let allowed_coins = self.allowed_coins.clone();
+                let l2_books: Vec<(Coin, L2Book)> = coins
+                    .iter()
+                    .filter_map(|coin| state.get_l2_book(coin, max_levels).map(|book| (coin.clone(), book)))
+                    .collect();
+                let max_bids = self.max_bids;
+                let max_asks = self.max_asks;
 
-            tokio::spawn(async move {
-                let mut emitter = emitter_arc.lock().await;
-                for (coin, book) in l2_books {
-                    if !allowed_coins.contains(&coin.value()) {
-                        continue;
-                    }
+                tokio::spawn(async move {
+                    let mut emitter = emitter_arc.lock().await;
+                    for (coin, book) in l2_books {
+                        if !allowed_coins.contains(&coin.value()) {
+                            continue;
+                        }
 
-                    match book.to_unified(&coin.value(), max_bids, max_asks) {
-                        Ok(unified_book) => {
-                            if let Err(err) =
-                                emitter.process_coin_incremental(&coin.value(), &unified_book, block_height).await
-                            {
-                                error!("Failed to publish incremental L2 data to Redis: {err}");
+                        match book.to_unified(&coin.value(), max_bids, max_asks) {
+                            Ok(unified_book) => {
+                                if let Err(err) =
+                                    emitter.process_coin_incremental(&coin.value(), &unified_book, block_height).await
+                                {
+                                    error!("Failed to publish incremental L2 data to Redis: {err}");
+                                }
+                            }
+                            Err(err) => {
+                                error!("Failed to convert L2Book to UnifiedOrderbook: {}", err);
                             }
                         }
-                        Err(err) => {
-                            error!("Failed to convert L2Book to UnifiedOrderbook: {}", err);
-                        }
                     }
-                }
-            });
-        }
+                });
+            }
         }
     }
 
@@ -658,7 +659,7 @@ impl DirectoryListener for OrderBookListener {
                         error!(
                             "{event_source} serialization error {err}, height: {:?}, line: {:?}",
                             self.order_book_state.as_ref().map(OrderBookState::height),
-                            &line[..100],
+                            &line[..line.len().min(100)],
                         );
                         #[allow(clippy::unwrap_used)]
                         let total_len: i64 = total_len.try_into().unwrap();
