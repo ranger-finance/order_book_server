@@ -21,7 +21,7 @@ impl RedisConsumer {
     }
 
     fn get_orderbook_key(&self, exchange: Exchange, symbol: &str) -> String {
-        format!("{}:orderbook:{}:{}", self.key_prefix, exchange.as_str(), symbol)
+        format!("{}:{}:{}", self.key_prefix, exchange.as_str(), symbol)
     }
 
     fn get_updates_channel(&self) -> String {

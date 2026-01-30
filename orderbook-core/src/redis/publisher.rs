@@ -21,7 +21,7 @@ impl RedisPublisher {
 
     /// Get the Redis key for an orderbook (includes exchange and symbol)
     fn get_orderbook_key(&self, exchange: Exchange, symbol: &str) -> String {
-        format!("{}:orderbook:{}:{}", self.key_prefix, exchange.as_str(), symbol)
+        format!("{}:{}:{}", self.key_prefix, exchange.as_str(), symbol)
     }
 
     /// Publish a unified orderbook snapshot to Redis with TTL (default: 1 hour)
