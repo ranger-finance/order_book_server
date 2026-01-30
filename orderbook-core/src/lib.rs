@@ -57,7 +57,7 @@ pub use stream::{OrderBookStream, StreamConfig, StreamEvent};
 pub use l2_emitter::L2Emitter;
 
 // Re-export cache types
-pub use cache::{OrderBookCache, OrderBookKey};
+pub use cache::OrderBookCache;
 
 // Re-export Redis modules
 pub use redis::{RedisConfig, RedisPublisher};
