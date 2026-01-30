@@ -1,6 +1,5 @@
 use std::io;
 
-use crate::types::L2Book;
 use bb8_redis::{
     RedisConnectionManager,
     bb8::{Pool, PooledConnection, RunError},
@@ -8,6 +7,7 @@ use bb8_redis::{
 };
 use futures_util::StreamExt;
 use log::warn;
+use orderbook_normaliser::models::{Exchange, UnifiedOrderbook};
 
 pub struct RedisConsumer {
     pool: Pool<RedisConnectionManager>,
@@ -20,16 +20,16 @@ impl RedisConsumer {
         Self { pool, key_prefix, redis_url }
     }
 
-    fn get_orderbook_key(&self, coin: &str) -> String {
-        format!("{}:orderbook:{}", self.key_prefix, coin)
+    fn get_orderbook_key(&self, exchange: Exchange, symbol: &str) -> String {
+        format!("{}:orderbook:{}:{}", self.key_prefix, exchange.as_str(), symbol)
     }
 
     fn get_updates_channel(&self) -> String {
         format!("{}:updates", self.key_prefix)
     }
 
-    pub async fn get_l2_book(&self, coin: &str) -> RedisResult<Option<L2Book>> {
-        let key = self.get_orderbook_key(coin);
+    pub async fn get_orderbook(&self, exchange: Exchange, symbol: &str) -> RedisResult<Option<UnifiedOrderbook>> {
+        let key = self.get_orderbook_key(exchange, symbol);
 
         let mut conn: PooledConnection<'_, RedisConnectionManager> =
             self.pool.get().await.map_err(|e: RunError<RedisError>| {
@@ -40,7 +40,7 @@ impl RedisConsumer {
 
         match result {
             Some(json) => {
-                let deserialized: L2Book = serde_json::from_str(&json).map_err(|e| {
+                let deserialized: UnifiedOrderbook = serde_json::from_str(&json).map_err(|e| {
                     RedisError::from(io::Error::new(io::ErrorKind::Other, format!("Deserialization error: {}", e)))
                 })?;
                 Ok(Some(deserialized))
@@ -49,7 +49,7 @@ impl RedisConsumer {
         }
     }
 
-    pub async fn subscribe_to_updates(&self) -> RedisResult<tokio::sync::mpsc::Receiver<String>> {
+    pub async fn subscribe_to_updates(&self) -> RedisResult<tokio::sync::mpsc::Receiver<(Exchange, String)>> {
         let updates_channel = self.get_updates_channel();
         let redis_url = self.redis_url.clone();
         let (tx, rx) = tokio::sync::mpsc::channel(100);
@@ -78,17 +78,21 @@ impl RedisConsumer {
                     continue;
                 }
                 while let Some(msg) = pubsub.on_message().next().await {
-                    let coin: String = match msg.get_payload() {
+                    let payload: String = match msg.get_payload() {
                         Ok(c) => c,
                         Err(e) => {
                             warn!("Failed to get message payload: {:?}", e);
                             continue;
                         }
                     };
-                    if !coin.is_empty() {
-                        if tx.send(coin).await.is_err() {
-                            warn!("Failed to send update through channel");
-                            break;
+                    if !payload.is_empty() {
+                        if let Some((exchange, symbol)) = parse_exchange_symbol(&payload) {
+                            if tx.send((exchange, symbol)).await.is_err() {
+                                warn!("Failed to send update through channel");
+                                break;
+                            }
+                        } else {
+                            warn!("Failed to parse exchange:symbol from payload: {}", payload);
                         }
                     }
                 }
@@ -106,5 +110,16 @@ impl RedisConsumer {
             Ok(mut conn) => cmd("PING").query_async::<String>(&mut *conn).await.is_ok(),
             Err(_) => false,
         }
+    }
+}
+
+fn parse_exchange_symbol(payload: &str) -> Option<(Exchange, String)> {
+    let parts: Vec<&str> = payload.splitn(2, ':').collect();
+    if parts.len() == 2 {
+        let exchange = Exchange::from_str(parts[0]).ok()?;
+        let symbol = parts[1].to_string();
+        Some((exchange, symbol))
+    } else {
+        None
     }
 }

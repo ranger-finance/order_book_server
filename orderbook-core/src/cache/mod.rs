@@ -5,12 +5,11 @@ use std::sync::{Arc, Mutex};
 
 use lru::LruCache;
 
-use crate::orderbook::types::Coin;
-use crate::types::L2Book;
+use orderbook_normaliser::models::UnifiedOrderbook;
 
 #[derive(Clone, Debug)]
 pub struct OrderBookCache {
-    cache: Arc<Mutex<LruCache<Coin, L2Book>>>,
+    cache: Arc<Mutex<LruCache<String, UnifiedOrderbook>>>,
 }
 
 impl OrderBookCache {
@@ -18,19 +17,19 @@ impl OrderBookCache {
         Self { cache: Arc::new(Mutex::new(LruCache::new(capacity))) }
     }
 
-    pub fn get(&self, coin: &Coin) -> Option<L2Book> {
+    pub fn get(&self, symbol: &str) -> Option<UnifiedOrderbook> {
         let mut cache = self.cache.lock().unwrap();
-        cache.get(coin).cloned()
+        cache.get(symbol).cloned()
     }
 
-    pub fn put(&self, coin: Coin, book: L2Book) {
+    pub fn put(&self, symbol: String, book: UnifiedOrderbook) {
         let mut cache = self.cache.lock().unwrap();
-        cache.put(coin, book);
+        cache.put(symbol, book);
     }
 
-    pub fn remove(&self, coin: &Coin) -> Option<L2Book> {
+    pub fn remove(&self, symbol: &str) -> Option<UnifiedOrderbook> {
         let mut cache = self.cache.lock().unwrap();
-        cache.pop(coin)
+        cache.pop(symbol)
     }
 
     pub fn len(&self) -> usize {
