@@ -129,6 +129,7 @@ pub async fn run_websocket_server(
     max_bids: Option<usize>,
     max_asks: Option<usize>,
     streaming_config: &StreamingConfig,
+    allowed_coins: Option<Vec<String>>,
 ) -> super::Result<()> {
     let (internal_message_tx, _) = channel::<Arc<InternalMessage>>(100);
 
@@ -163,6 +164,7 @@ pub async fn run_websocket_server(
             max_asks,
             streaming_config.streaming_mode,
             Some(streaming_config.streaming_buffer_ms),
+            allowed_coins,
         )
     };
     let listener = Arc::new(Mutex::new(listener));

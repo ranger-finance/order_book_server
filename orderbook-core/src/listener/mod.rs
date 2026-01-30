@@ -38,8 +38,6 @@ use tokio::{
 };
 use utils::{BatchQueue, EventBatch, process_rmp_file, validate_snapshot_consistency};
 
-const ALLOWED_COINS: &[&str] = &["BTC", "ETH", "SOL"];
-
 pub mod cleanup;
 pub mod directory;
 pub mod event_buffer;
@@ -204,7 +202,7 @@ pub struct OrderBookListener {
     max_bids: Option<usize>,
     max_asks: Option<usize>,
     streaming_mode: bool,
-    streaming_buffer_ms: u64,
+    allowed_coins: Vec<String>,
     fill_status_file: Option<File>,
     order_status_file: Option<File>,
     order_diff_file: Option<File>,
@@ -230,6 +228,7 @@ impl OrderBookListener {
         max_asks: Option<usize>,
         streaming_mode: bool,
         streaming_buffer_ms: Option<u64>,
+        allowed_coins: Option<Vec<String>>,
     ) -> Self {
         let l2_emitter = redis_publisher.map(|publisher| {
             Arc::new(Mutex::new(L2Emitter::new(
@@ -242,13 +241,14 @@ impl OrderBookListener {
         });
 
         let buffer_window_ms = streaming_buffer_ms.unwrap_or(50);
+        let allowed_coins = allowed_coins.unwrap_or_else(|| vec!["BTC".to_string(), "ETH".to_string(), "SOL".to_string()]);
 
         Self {
             ignore_spot,
             max_bids,
             max_asks,
             streaming_mode,
-            streaming_buffer_ms: buffer_window_ms,
+            allowed_coins,
             fill_status_file: None,
             order_status_file: None,
             order_diff_file: None,
@@ -271,7 +271,7 @@ impl OrderBookListener {
         ignore_spot: bool,
         redis_publisher: Option<Arc<RedisPublisher>>,
     ) -> Self {
-        Self::new_with_streaming(internal_message_tx, ignore_spot, redis_publisher, None, None, false, None)
+        Self::new_with_streaming(internal_message_tx, ignore_spot, redis_publisher, None, None, false, None, None)
     }
 
     fn clone_state(&self) -> Option<OrderBookState> {
@@ -498,6 +498,7 @@ impl OrderBookListener {
         if let Some(state) = &self.order_book_state {
         if let Some(ref l2_emitter) = self.l2_emitter {
             let emitter_arc = l2_emitter.clone();
+            let allowed_coins = self.allowed_coins.clone();
             let l2_books: Vec<(Coin, L2Book)> = coins
                 .iter()
                 .filter_map(|coin| state.get_l2_book(coin, max_levels).map(|book| (coin.clone(), book)))
@@ -508,7 +509,7 @@ impl OrderBookListener {
             tokio::spawn(async move {
                 let mut emitter = emitter_arc.lock().await;
                 for (coin, book) in l2_books {
-                    if !ALLOWED_COINS.contains(&coin.value().as_str()) {
+                    if !allowed_coins.contains(&coin.value()) {
                         continue;
                     }
 
@@ -538,10 +539,11 @@ impl OrderBookListener {
             let emitter_arc = l2_emitter.clone();
             let max_bids = self.max_bids;
             let max_asks = self.max_asks;
+            let allowed_coins = self.allowed_coins.clone();
             tokio::spawn(async move {
                 let mut emitter = emitter_arc.lock().await;
                 for (coin, params_map) in l2_snapshots.as_ref() {
-                    if !ALLOWED_COINS.contains(&coin.value().as_str()) {
+                    if !allowed_coins.contains(&coin.value()) {
                         continue;
                     }
                     let raw_params = L2SnapshotParams { n_sig_figs: None, mantissa: None };

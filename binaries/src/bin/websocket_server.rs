@@ -62,6 +62,10 @@ struct Args {
     /// Buffer time in milliseconds for streaming updates (default: 50)
     #[arg(long, default_value = "50")]
     streaming_buffer_ms: u64,
+
+    /// Comma-separated list of allowed coins (default: BTC,ETH,SOL)
+    #[arg(long, value_delimiter = ',', default_values_t = vec!["BTC".to_string(), "ETH".to_string(), "SOL".to_string()])]
+    allowed_coins: Vec<String>,
 }
 
 #[tokio::main]
@@ -107,7 +111,7 @@ async fn main() -> Result<()> {
         tokio::pin!(cleanup_handle);
 
         tokio::select! {
-            result = run_websocket_server(&full_address, true, compression_level, redis_url.as_deref(), args.max_bids, args.max_asks, &streaming_config) => {
+            result = run_websocket_server(&full_address, true, compression_level, redis_url.as_deref(), args.max_bids, args.max_asks, &streaming_config, Some(args.allowed_coins.clone())) => {
                 result?;
             }
             _ = &mut cleanup_handle => {
@@ -115,7 +119,7 @@ async fn main() -> Result<()> {
             }
         }
     } else {
-        run_websocket_server(&full_address, true, compression_level, redis_url.as_deref(), args.max_bids, args.max_asks, &streaming_config).await?;
+        run_websocket_server(&full_address, true, compression_level, redis_url.as_deref(), args.max_bids, args.max_asks, &streaming_config, Some(args.allowed_coins.clone())).await?;
     }
 
     Ok(())
