@@ -1,9 +1,9 @@
 #![allow(unused_crate_dependencies)]
 use clap::Parser;
 use futures_util::{sink::SinkExt, stream::StreamExt};
-use orderbook_core::redis::config::RedisConfig;
-use orderbook_core::redis::consumer::RedisConsumer;
-use orderbook_core::types::L2Book;
+use orderbook_core::{
+    Exchange, UnifiedOrderbook, redis::config::RedisConfig, redis::consumer::RedisConsumer,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -26,18 +26,19 @@ struct Args {
 #[derive(Debug, Deserialize)]
 struct ClientMessage {
     action: String,
-    coin: Option<String>,
+    exchange: Option<String>,
+    symbol: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 enum ServerMessage {
     #[serde(rename = "snapshot")]
-    Snapshot { coin: String, data: L2Book },
+    Snapshot { data: UnifiedOrderbook },
     #[serde(rename = "subscribed")]
-    Subscribed { coin: String },
+    Subscribed { exchange: Exchange, symbol: String },
     #[serde(rename = "unsubscribed")]
-    Unsubscribed { coin: String },
+    Unsubscribed { exchange: Exchange, symbol: String },
     #[serde(rename = "error")]
     Error { message: String },
 }
@@ -47,39 +48,39 @@ type ClientSender = mpsc::Sender<Message>;
 #[derive(Clone)]
 struct Client {
     id: String,
-    coins: Vec<String>,
+    symbols: Vec<String>,
     sender: ClientSender,
 }
 
 struct ClientManager {
     clients: HashMap<String, Client>,
-    coin_to_clients: HashMap<String, Vec<String>>,
+    symbol_to_clients: HashMap<String, Vec<String>>,
 }
 
 impl ClientManager {
     fn new() -> Self {
-        Self { clients: HashMap::new(), coin_to_clients: HashMap::new() }
+        Self { clients: HashMap::new(), symbol_to_clients: HashMap::new() }
     }
 
     fn add_client(&mut self, id: String, sender: ClientSender) {
-        self.clients.insert(id.clone(), Client { id: id.clone(), coins: Vec::new(), sender });
+        self.clients.insert(id.clone(), Client { id: id.clone(), symbols: Vec::new(), sender });
     }
 
     fn remove_client(&mut self, id: &str) {
         if let Some(client) = self.clients.remove(id) {
-            for coin in client.coins {
-                if let Some(clients) = self.coin_to_clients.get_mut(&coin) {
+            for symbol in client.symbols {
+                if let Some(clients) = self.symbol_to_clients.get_mut(&symbol) {
                     clients.retain(|client_id| client_id != id);
                 }
             }
         }
     }
 
-    fn subscribe(&mut self, client_id: &str, coin: String) -> bool {
+    fn subscribe(&mut self, client_id: &str, symbol: String) -> bool {
         if let Some(client) = self.clients.get_mut(client_id) {
-            if !client.coins.contains(&coin) {
-                client.coins.push(coin.clone());
-                self.coin_to_clients.entry(coin.clone()).or_insert_with(Vec::new).push(client_id.to_string());
+            if !client.symbols.contains(&symbol) {
+                client.symbols.push(symbol.clone());
+                self.symbol_to_clients.entry(symbol.clone()).or_insert_with(Vec::new).push(client_id.to_string());
             }
             true
         } else {
@@ -87,10 +88,10 @@ impl ClientManager {
         }
     }
 
-    fn unsubscribe(&mut self, client_id: &str, coin: &str) -> bool {
+    fn unsubscribe(&mut self, client_id: &str, symbol: &str) -> bool {
         if let Some(client) = self.clients.get_mut(client_id) {
-            client.coins.retain(|c| c != coin);
-            if let Some(clients) = self.coin_to_clients.get_mut(coin) {
+            client.symbols.retain(|s| s != symbol);
+            if let Some(clients) = self.symbol_to_clients.get_mut(symbol) {
                 clients.retain(|id| id != client_id);
             }
             true
@@ -99,9 +100,9 @@ impl ClientManager {
         }
     }
 
-    fn get_clients_for_coin(&self, coin: &str) -> Vec<ClientSender> {
-        self.coin_to_clients
-            .get(coin)
+    fn get_clients_for_symbol(&self, symbol: &str) -> Vec<ClientSender> {
+        self.symbol_to_clients
+            .get(symbol)
             .map(|client_ids| {
                 client_ids.iter().filter_map(|id| self.clients.get(id)).map(|client| client.sender.clone()).collect()
             })
@@ -140,9 +141,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let manager = Arc::clone(&client_manager);
 
         async move {
-            while let Some(coin) = update_rx.recv().await {
-                if let Ok(Some(book)) = consumer.get_l2_book(&coin).await {
-                    let response = ServerMessage::Snapshot { coin: coin.clone(), data: book };
+            while let Some((exchange, symbol)) = update_rx.recv().await {
+                if let Ok(Some(book)) = consumer.get_orderbook(exchange, &symbol).await {
+                    let response = ServerMessage::Snapshot { data: book };
 
                     let json = match serde_json::to_string(&response) {
                         Ok(j) => j,
@@ -153,7 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
 
                     let managers = manager.read().await;
-                    for client in managers.get_clients_for_coin(&coin) {
+                    for client in managers.get_clients_for_symbol(&symbol) {
                         drop(client.send(Message::Text(json.clone().into())).await);
                     }
                 }
@@ -200,43 +201,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
                                     match client_msg.action.as_str() {
                                         "subscribe" => {
-                                            if let Some(coin) = client_msg.coin {
-                                                let mut manager = manager_for_task.write().await;
-                                                if manager.subscribe(&client_id, coin.clone()) {
-                                                    let response = ServerMessage::Subscribed {
-                                                        coin: coin.clone(),
-                                                    };
+                                            if let (Some(exchange_str), Some(symbol)) = (client_msg.exchange, client_msg.symbol) {
+                                                match Exchange::from_str(&exchange_str) {
+                                                    Ok(exchange) => {
+                                                        let mut manager = manager_for_task.write().await;
+                                                        if manager.subscribe(&client_id, symbol.clone()) {
+                                                            let response = ServerMessage::Subscribed {
+                                                                exchange,
+                                                                symbol: symbol.clone(),
+                                                            };
 
-                                                    if let Ok(json) = serde_json::to_string(&response) {
-                                                        drop(write.send(Message::Text(json.into())).await);
-                                                    }
-
-
-                                                    if let Ok(Some(book)) = consumer_for_task.get_l2_book(&coin).await {
-                                                        let response = ServerMessage::Snapshot {
-                                                            coin: coin.clone(),
-                                                            data: book,
-                                                        };
-
-                                                        if let Ok(json) = serde_json::to_string(&response) {
-                                                            if write.send(Message::Text(json.into())).await.is_err() {
-                                                                break;
+                                                            if let Ok(json) = serde_json::to_string(&response) {
+                                                                drop(write.send(Message::Text(json.into())).await);
                                                             }
+
+                                                            if let Ok(Some(book)) = consumer_for_task.get_orderbook(exchange, &symbol).await {
+                                                                let response = ServerMessage::Snapshot {
+                                                                    data: book,
+                                                                };
+
+                                                                if let Ok(json) = serde_json::to_string(&response) {
+                                                                    if write.send(Message::Text(json.into())).await.is_err() {
+                                                                        break;
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        let response = ServerMessage::Error {
+                                                            message: format!("Invalid exchange: {}", e),
+                                                        };
+                                                        if let Ok(json) = serde_json::to_string(&response) {
+                                                            drop(write.send(Message::Text(json.into())).await);
                                                         }
                                                     }
                                                 }
                                             }
                                         }
                                         "unsubscribe" => {
-                                            if let Some(coin) = client_msg.coin {
-                                                let mut manager = manager_for_task.write().await;
-                                                if manager.unsubscribe(&client_id, &coin) {
-                                                    let response = ServerMessage::Unsubscribed {
-                                                        coin,
-                                                    };
+                                            if let (Some(exchange_str), Some(symbol)) = (client_msg.exchange, client_msg.symbol) {
+                                                match Exchange::from_str(&exchange_str) {
+                                                    Ok(exchange) => {
+                                                        let mut manager = manager_for_task.write().await;
+                                                        if manager.unsubscribe(&client_id, &symbol) {
+                                                            let response = ServerMessage::Unsubscribed {
+                                                                exchange,
+                                                                symbol,
+                                                            };
 
-                                                    if let Ok(json) = serde_json::to_string(&response) {
-                                                        drop(write.send(Message::Text(json.into())).await);
+                                                            if let Ok(json) = serde_json::to_string(&response) {
+                                                                drop(write.send(Message::Text(json.into())).await);
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        let response = ServerMessage::Error {
+                                                            message: format!("Invalid exchange: {}", e),
+                                                        };
+                                                        if let Ok(json) = serde_json::to_string(&response) {
+                                                            drop(write.send(Message::Text(json.into())).await);
+                                                        }
                                                     }
                                                 }
                                             }
