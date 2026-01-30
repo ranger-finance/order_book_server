@@ -56,9 +56,15 @@ impl L2Book {
         Self { coin, time, levels: snapshot }
     }
 
-    pub fn to_unified(&self, symbol: &str) -> Result<UnifiedOrderbook, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn to_unified(
+        &self,
+        symbol: &str,
+        max_bids: Option<usize>,
+        max_asks: Option<usize>,
+    ) -> Result<UnifiedOrderbook, Box<dyn std::error::Error + Send + Sync>> {
         let bids: Vec<PriceLevel> = self.levels[0]
             .iter()
+            .take(max_bids.unwrap_or(usize::MAX))
             .map::<Result<PriceLevel, rust_decimal::Error>, _>(|level: &Level| {
                 let price = level.px.parse::<Decimal>()?;
                 let size = level.sz.parse::<Decimal>()?;
@@ -68,6 +74,7 @@ impl L2Book {
 
         let asks: Vec<PriceLevel> = self.levels[1]
             .iter()
+            .take(max_asks.unwrap_or(usize::MAX))
             .map::<Result<PriceLevel, rust_decimal::Error>, _>(|level: &Level| {
                 let price = level.px.parse::<Decimal>()?;
                 let size = level.sz.parse::<Decimal>()?;

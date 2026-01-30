@@ -2,7 +2,7 @@ use axum::{Router, response::IntoResponse, routing::get};
 use futures_util::{SinkExt, StreamExt};
 use log::{error, info};
 use orderbook_core::{
-    L2Book, L4Book, L4BookUpdates, L4Order, RedisConfig, RedisPublisher, Trade, UnifiedOrderbook,
+    L2Book, L4Book, L4BookUpdates, L4Order, RedisConfig, RedisPublisher, Trade, UnifiedOrderbook, config::StreamingConfig,
     internal::{
         Coin, InnerLevel, InternalMessage, L2SnapshotParams, L2Snapshots, OrderBookListener, Snapshot, TimedSnapshots,
         hl_listen,
@@ -126,6 +126,9 @@ pub async fn run_websocket_server(
     ignore_spot: bool,
     compression_level: u32,
     redis_url: Option<&str>,
+    max_bids: Option<usize>,
+    max_asks: Option<usize>,
+    streaming_config: &StreamingConfig,
 ) -> super::Result<()> {
     let (internal_message_tx, _) = channel::<Arc<InternalMessage>>(100);
 
@@ -152,7 +155,15 @@ pub async fn run_websocket_server(
     let home_dir = dirs::home_dir().ok_or("Could not find home directory")?;
     let listener = {
         let internal_message_tx = internal_message_tx.clone();
-        OrderBookListener::new(Some(internal_message_tx), ignore_spot, redis_publisher)
+        OrderBookListener::new_with_streaming(
+            Some(internal_message_tx),
+            ignore_spot,
+            redis_publisher,
+            max_bids,
+            max_asks,
+            streaming_config.streaming_mode,
+            Some(streaming_config.streaming_buffer_ms),
+        )
     };
     let listener = Arc::new(Mutex::new(listener));
 
@@ -173,7 +184,15 @@ pub async fn run_websocket_server(
         get({
             let internal_message_tx = internal_message_tx.clone();
             async move |ws_upgrade| {
-                ws_handler(ws_upgrade, internal_message_tx.clone(), listener.clone(), ignore_spot, websocket_opts)
+                ws_handler(
+                    ws_upgrade,
+                    internal_message_tx.clone(),
+                    listener.clone(),
+                    ignore_spot,
+                    websocket_opts,
+                    max_bids,
+                    max_asks,
+                )
             }
         }),
     );
@@ -195,6 +214,8 @@ fn ws_handler(
     listener: Arc<Mutex<OrderBookListener>>,
     ignore_spot: bool,
     websocket_opts: yawc::Options,
+    max_bids: Option<usize>,
+    max_asks: Option<usize>,
 ) -> impl IntoResponse {
     let (resp, fut) = incoming.upgrade(websocket_opts).unwrap();
     tokio::spawn(async move {
@@ -206,7 +227,7 @@ fn ws_handler(
             }
         };
 
-        handle_socket(ws, internal_message_tx, listener, ignore_spot).await
+        handle_socket(ws, internal_message_tx, listener, ignore_spot, max_bids, max_asks).await
     });
 
     resp
@@ -217,6 +238,8 @@ async fn handle_socket(
     internal_message_tx: Sender<Arc<InternalMessage>>,
     listener: Arc<Mutex<OrderBookListener>>,
     ignore_spot: bool,
+    max_bids: Option<usize>,
+    max_asks: Option<usize>,
 ) {
     let mut internal_message_rx = internal_message_tx.subscribe();
     let is_ready = listener.lock().await.is_ready();
@@ -236,7 +259,7 @@ async fn handle_socket(
                             InternalMessage::Snapshot{ l2_snapshots, time } => {
                                 universe = new_universe(l2_snapshots, ignore_spot);
                                 for sub in manager.subscriptions() {
-                                    send_ws_data_from_snapshot(&mut socket, sub, l2_snapshots.as_ref(), *time).await;
+                                    send_ws_data_from_snapshot(&mut socket, sub, l2_snapshots.as_ref(), *time, max_bids, max_asks).await;
                                 }
                             },
                             InternalMessage::Fills{ batch } => {
@@ -371,6 +394,8 @@ async fn send_ws_data_from_snapshot(
     subscription: &Subscription,
     snapshot: &HashMap<Coin, HashMap<L2SnapshotParams, Snapshot<InnerLevel>>>,
     time: u64,
+    max_bids: Option<usize>,
+    max_asks: Option<usize>,
 ) {
     if let Subscription::L2Book { coin, n_sig_figs, n_levels, mantissa } = subscription {
         let snapshot = snapshot.get(&Coin::new(coin));
@@ -381,7 +406,7 @@ async fn send_ws_data_from_snapshot(
             let snapshot = snapshot.truncate(n_levels);
             let levels = snapshot.export_inner_snapshot();
             let l2_book = L2Book::from_l2_snapshot(coin.clone(), levels, time);
-            match l2_book.to_unified(coin) {
+            match l2_book.to_unified(coin, max_bids, max_asks) {
                 Ok(unified_book) => {
                     let msg = ServerResponse::L2Book(unified_book);
                     send_socket_message(socket, msg).await;

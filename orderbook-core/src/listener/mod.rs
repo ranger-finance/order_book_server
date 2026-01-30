@@ -1,7 +1,6 @@
 use crate::{
     HL_NODE, L2Emitter,
     cache::OrderBookCache,
-    config::StreamingConfig,
     listener::directory::DirectoryListener,
     metrics::StreamingMetrics,
     orderbook::{
@@ -202,6 +201,8 @@ fn fetch_snapshot(
 
 pub struct OrderBookListener {
     pub ignore_spot: bool,
+    max_bids: Option<usize>,
+    max_asks: Option<usize>,
     streaming_mode: bool,
     streaming_buffer_ms: u64,
     fill_status_file: Option<File>,
@@ -225,6 +226,8 @@ impl OrderBookListener {
         internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
         ignore_spot: bool,
         redis_publisher: Option<Arc<RedisPublisher>>,
+        max_bids: Option<usize>,
+        max_asks: Option<usize>,
         streaming_mode: bool,
         streaming_buffer_ms: Option<u64>,
     ) -> Self {
@@ -242,6 +245,8 @@ impl OrderBookListener {
 
         Self {
             ignore_spot,
+            max_bids,
+            max_asks,
             streaming_mode,
             streaming_buffer_ms: buffer_window_ms,
             fill_status_file: None,
@@ -266,22 +271,7 @@ impl OrderBookListener {
         ignore_spot: bool,
         redis_publisher: Option<Arc<RedisPublisher>>,
     ) -> Self {
-        Self::new_with_streaming(internal_message_tx, ignore_spot, redis_publisher, false, None)
-    }
-
-    pub fn new_from_env(
-        internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
-        ignore_spot: bool,
-        redis_publisher: Option<Arc<RedisPublisher>>,
-    ) -> Self {
-        let config = StreamingConfig::from_env();
-        Self::new_with_streaming(
-            internal_message_tx,
-            ignore_spot,
-            redis_publisher,
-            config.streaming_mode,
-            Some(config.streaming_buffer_ms),
-        )
+        Self::new_with_streaming(internal_message_tx, ignore_spot, redis_publisher, None, None, false, None)
     }
 
     fn clone_state(&self) -> Option<OrderBookState> {
@@ -506,35 +496,37 @@ impl OrderBookListener {
         let max_levels = 100;
 
         if let Some(state) = &self.order_book_state {
-            if let Some(ref l2_emitter) = self.l2_emitter {
-                let emitter_arc = l2_emitter.clone();
-                let l2_books: Vec<(Coin, L2Book)> = coins
-                    .iter()
-                    .filter_map(|coin| state.get_l2_book(coin, max_levels).map(|book| (coin.clone(), book)))
-                    .collect();
+        if let Some(ref l2_emitter) = self.l2_emitter {
+            let emitter_arc = l2_emitter.clone();
+            let l2_books: Vec<(Coin, L2Book)> = coins
+                .iter()
+                .filter_map(|coin| state.get_l2_book(coin, max_levels).map(|book| (coin.clone(), book)))
+                .collect();
+            let max_bids = self.max_bids;
+            let max_asks = self.max_asks;
 
-                tokio::spawn(async move {
-                    let mut emitter = emitter_arc.lock().await;
-                    for (coin, book) in l2_books {
-                        if !ALLOWED_COINS.contains(&coin.value().as_str()) {
-                            continue;
+            tokio::spawn(async move {
+                let mut emitter = emitter_arc.lock().await;
+                for (coin, book) in l2_books {
+                    if !ALLOWED_COINS.contains(&coin.value().as_str()) {
+                        continue;
+                    }
+
+                    match book.to_unified(&coin.value(), max_bids, max_asks) {
+                        Ok(unified_book) => {
+                            if let Err(err) =
+                                emitter.process_coin_incremental(&coin.value(), &unified_book, block_height).await
+                            {
+                                error!("Failed to publish incremental L2 data to Redis: {err}");
+                            }
                         }
-
-                        match book.to_unified(&coin.value()) {
-                            Ok(unified_book) => {
-                                if let Err(err) =
-                                    emitter.process_coin_incremental(&coin.value(), &unified_book, block_height).await
-                                {
-                                    error!("Failed to publish incremental L2 data to Redis: {err}");
-                                }
-                            }
-                            Err(err) => {
-                                error!("Failed to convert L2Book to UnifiedOrderbook: {}", err);
-                            }
+                        Err(err) => {
+                            error!("Failed to convert L2Book to UnifiedOrderbook: {}", err);
                         }
                     }
-                });
-            }
+                }
+            });
+        }
         }
     }
 
@@ -544,6 +536,8 @@ impl OrderBookListener {
 
         if let Some(ref l2_emitter) = self.l2_emitter {
             let emitter_arc = l2_emitter.clone();
+            let max_bids = self.max_bids;
+            let max_asks = self.max_asks;
             tokio::spawn(async move {
                 let mut emitter = emitter_arc.lock().await;
                 for (coin, params_map) in l2_snapshots.as_ref() {
@@ -554,7 +548,7 @@ impl OrderBookListener {
                     if let Some(snapshot_inner) = params_map.get(&raw_params) {
                         let levels: [Vec<Level>; 2] = snapshot_inner.clone().export_inner_snapshot();
                         let l2_book = L2Book::from_l2_snapshot(coin.value(), levels, block_height);
-                        match l2_book.to_unified(&coin.value()) {
+                        match l2_book.to_unified(&coin.value(), max_bids, max_asks) {
                             Ok(unified_book) => {
                                 if let Err(err) = emitter.process_coin(&coin.value(), &unified_book, block_height).await
                                 {

@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 
 use clap::Parser;
 use tracing::{error, info};
-use orderbook_core::listener::perform_cleanup;
+use orderbook_core::{listener::perform_cleanup, config::StreamingConfig};
 use server::{Result, run_websocket_server};
 
 #[derive(Debug, Parser)]
@@ -44,6 +44,24 @@ struct Args {
     /// Redis URL for publishing L2 orderbook data (optional, defaults to REDIS_URL env var)
     #[arg(long)]
     redis_url: Option<String>,
+
+    /// Maximum number of bid levels in unified orderbook (optional)
+    /// If not set, unified orderbook has unlimited depth
+    #[arg(long)]
+    max_bids: Option<usize>,
+
+    /// Maximum number of ask levels in unified orderbook (optional)
+    /// If not set, unified orderbook has unlimited depth
+    #[arg(long)]
+    max_asks: Option<usize>,
+
+    /// Enable streaming mode for orderbook updates (default: false)
+    #[arg(long)]
+    streaming_mode: bool,
+
+    /// Buffer time in milliseconds for streaming updates (default: 50)
+    #[arg(long, default_value = "50")]
+    streaming_buffer_ms: u64,
 }
 
 #[tokio::main]
@@ -60,6 +78,11 @@ async fn main() -> Result<()> {
     let compression_level = args.websocket_compression_level.unwrap_or(/* Some compression */ 1);
 
     let redis_url = args.redis_url.or_else(|| std::env::var("REDIS_URL").ok());
+
+    let streaming_config = StreamingConfig {
+        streaming_mode: args.streaming_mode,
+        streaming_buffer_ms: args.streaming_buffer_ms,
+    };
 
     if let Some(interval_hours) = args.cleanup_interval {
         info!("Cleanup enabled: running every {} hours with {} days retention", interval_hours, args.retention_days);
@@ -84,7 +107,7 @@ async fn main() -> Result<()> {
         tokio::pin!(cleanup_handle);
 
         tokio::select! {
-            result = run_websocket_server(&full_address, true, compression_level, redis_url.as_deref()) => {
+            result = run_websocket_server(&full_address, true, compression_level, redis_url.as_deref(), args.max_bids, args.max_asks, &streaming_config) => {
                 result?;
             }
             _ = &mut cleanup_handle => {
@@ -92,7 +115,7 @@ async fn main() -> Result<()> {
             }
         }
     } else {
-        run_websocket_server(&full_address, true, compression_level, redis_url.as_deref()).await?;
+        run_websocket_server(&full_address, true, compression_level, redis_url.as_deref(), args.max_bids, args.max_asks, &streaming_config).await?;
     }
 
     Ok(())
