@@ -2,9 +2,9 @@
 use std::net::Ipv4Addr;
 
 use clap::Parser;
-use tracing::{error, info};
 use orderbook_core::listener::perform_cleanup;
 use server::{Result, run_websocket_server};
+use tracing::{error, info};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
@@ -44,6 +44,10 @@ struct Args {
     /// Redis URL for publishing L2 orderbook data (optional, defaults to REDIS_URL env var)
     #[arg(long)]
     redis_url: Option<String>,
+
+    /// Comma-separated list of allowed coins  (default: BTC,ETH,SOL)
+    #[arg(long, value_delimiter = ',', default_values_t = vec!["BTC".to_string(), "ETH".to_string(), "SOL".to_string()])]
+    allowed_coins: Vec<String>,
 }
 
 #[tokio::main]
@@ -67,6 +71,7 @@ async fn main() -> Result<()> {
 
         let base_dir = args.base_dir.clone();
         let retention_days = args.retention_days as i64;
+        let allowed_coins: Vec<String> = args.allowed_coins.clone();
 
         perform_cleanup(base_dir.clone(), retention_days).await?;
 
@@ -84,7 +89,7 @@ async fn main() -> Result<()> {
         tokio::pin!(cleanup_handle);
 
         tokio::select! {
-            result = run_websocket_server(&full_address, true, compression_level, redis_url.as_deref()) => {
+            result = run_websocket_server(&full_address, true, compression_level, redis_url.as_deref(), &allowed_coins) => {
                 result?;
             }
             _ = &mut cleanup_handle => {
@@ -92,7 +97,7 @@ async fn main() -> Result<()> {
             }
         }
     } else {
-        run_websocket_server(&full_address, true, compression_level, redis_url.as_deref()).await?;
+        run_websocket_server(&full_address, true, compression_level, redis_url.as_deref(), &vec![]).await?;
     }
 
     Ok(())

@@ -37,8 +37,6 @@ use tokio::{
 };
 use utils::{BatchQueue, EventBatch, process_rmp_file, validate_snapshot_consistency};
 
-const ALLOWED_COINS: &[&str] = &["BTC", "ETH", "SOL"];
-
 pub mod cleanup;
 pub mod directory;
 pub mod utils;
@@ -210,6 +208,7 @@ pub struct OrderBookListener {
     fetched_snapshot_cache: Option<VecDeque<(Batch<NodeDataOrderStatus>, Batch<NodeDataOrderDiff>)>>,
     internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
     l2_emitter: Option<Arc<Mutex<L2Emitter>>>,
+    allowed_coins: Vec<String>,
 }
 
 impl OrderBookListener {
@@ -217,6 +216,7 @@ impl OrderBookListener {
         internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
         ignore_spot: bool,
         redis_publisher: Option<Arc<RedisPublisher>>,
+        allowed_coins: Option<&Vec<String>>,
     ) -> Self {
         let l2_emitter = redis_publisher.map(|publisher| {
             Arc::new(Mutex::new(L2Emitter::new_with_default_interval(OrderBookCache::default(), publisher)))
@@ -234,6 +234,7 @@ impl OrderBookListener {
             order_diff_cache: BatchQueue::new(),
             order_status_cache: BatchQueue::new(),
             l2_emitter,
+            allowed_coins: allowed_coins.or(Some(&Vec::new())).cloned().unwrap_or_default(),
         }
     }
 
@@ -364,10 +365,11 @@ impl OrderBookListener {
 
         if let Some(ref l2_emitter) = self.l2_emitter {
             let emitter_arc = l2_emitter.clone();
+            let allowed_coins = self.allowed_coins.clone();
             tokio::spawn(async move {
                 let mut emitter = emitter_arc.lock().await;
                 for (coin, params_map) in l2_snapshots.as_ref() {
-                    if !ALLOWED_COINS.contains(&coin.value().as_str()) {
+                    if !allowed_coins.contains(&coin.value()) {
                         continue;
                     }
                     let raw_params = L2SnapshotParams { n_sig_figs: None, mantissa: None };

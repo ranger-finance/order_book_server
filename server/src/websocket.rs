@@ -2,13 +2,12 @@ use axum::{Router, response::IntoResponse, routing::get};
 use futures_util::{SinkExt, StreamExt};
 use log::{error, info};
 use orderbook_core::{
-    L2Book, L4Book, L4BookUpdates, L4Order, Trade, RedisPublisher,
+    L2Book, L4Book, L4BookUpdates, L4Order, RedisConfig, RedisPublisher, Trade,
     internal::{
         Coin, InnerLevel, InternalMessage, L2SnapshotParams, L2Snapshots, OrderBookListener, Snapshot, TimedSnapshots,
         hl_listen,
     },
     types::node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
-    RedisConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -127,6 +126,7 @@ pub async fn run_websocket_server(
     ignore_spot: bool,
     compression_level: u32,
     redis_url: Option<&str>,
+    allowed_coins: &Vec<String>,
 ) -> super::Result<()> {
     let (internal_message_tx, _) = channel::<Arc<InternalMessage>>(100);
 
@@ -153,7 +153,7 @@ pub async fn run_websocket_server(
     let home_dir = dirs::home_dir().ok_or("Could not find home directory")?;
     let listener = {
         let internal_message_tx = internal_message_tx.clone();
-        OrderBookListener::new(Some(internal_message_tx), ignore_spot, redis_publisher)
+        OrderBookListener::new(Some(internal_message_tx), ignore_spot, redis_publisher, Some(allowed_coins))
     };
     let listener = Arc::new(Mutex::new(listener));
 
