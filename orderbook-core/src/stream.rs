@@ -1,18 +1,17 @@
 use crate::{
     listener::{OrderBookListener, hl_listen},
-    types::{
-        Level,
-        node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
-    },
+    types::node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
 };
+use orderbook_normaliser::models::UnifiedOrderbook;
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 use tokio::sync::{Mutex, broadcast};
 
 /// Events emitted by the orderbook stream
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
-    /// L2 orderbook snapshot for a coin
-    L2Snapshot { coin: String, time: u64, bids: Vec<Level>, asks: Vec<Level> },
+    /// Unified orderbook snapshot for a symbol
+    OrderbookSnapshot(UnifiedOrderbook),
+
     /// L4 book updates (order-level)
     L4Update {
         coin: String,

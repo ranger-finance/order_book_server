@@ -1,5 +1,5 @@
 [workspace]
-members = ["server", "binaries", "orderbook-core"]
+members = ["server", "binaries", "orderbook-core", "orderbook-normaliser"]
 
 resolver = "3"
 

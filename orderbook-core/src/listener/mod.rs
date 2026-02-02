@@ -229,10 +229,10 @@ impl OrderBookListener {
             order_diff_file: None,
             order_book_state: None,
             last_fill: None,
-            fetched_snapshot_cache: None,
-            internal_message_tx,
             order_diff_cache: BatchQueue::new(),
             order_status_cache: BatchQueue::new(),
+            fetched_snapshot_cache: None,
+            internal_message_tx,
             l2_emitter,
             allowed_coins: allowed_coins.or(Some(&Vec::new())).cloned().unwrap_or_default(),
         }
@@ -376,8 +376,16 @@ impl OrderBookListener {
                     if let Some(snapshot_inner) = params_map.get(&raw_params) {
                         let levels: [Vec<Level>; 2] = snapshot_inner.clone().export_inner_snapshot();
                         let l2_book = L2Book::from_l2_snapshot(coin.value(), levels, block_height);
-                        if let Err(err) = emitter.process_coin(coin, &l2_book, block_height).await {
-                            error!("Failed to publish L2 data to Redis: {}", err);
+                        match l2_book.to_unified(&coin.value()) {
+                            Ok(unified_book) => {
+                                if let Err(err) = emitter.process_coin(&coin.value(), &unified_book, block_height).await
+                                {
+                                    error!("Failed to publish L2 data to Redis: {}", err);
+                                }
+                            }
+                            Err(err) => {
+                                error!("Failed to convert L2Book to UnifiedOrderbook: {}", err);
+                            }
                         }
                     } else {
                         warn!("Raw L2 snapshot not found for coin: {}", coin.value());

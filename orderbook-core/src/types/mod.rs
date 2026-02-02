@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
 use alloy::primitives::Address;
+use orderbook_normaliser::models::{Exchange, PriceLevel, UnifiedOrderbook};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -52,6 +54,30 @@ pub enum L4Book {
 impl L2Book {
     pub const fn from_l2_snapshot(coin: String, snapshot: [Vec<Level>; 2], time: u64) -> Self {
         Self { coin, time, levels: snapshot }
+    }
+
+    pub fn to_unified(&self, symbol: &str) -> Result<UnifiedOrderbook, Box<dyn std::error::Error + Send + Sync>> {
+        let bids: Vec<PriceLevel> = self.levels[0]
+            .iter()
+            .map::<Result<PriceLevel, rust_decimal::Error>, _>(|level: &Level| {
+                let price = level.px.parse::<Decimal>()?;
+                let size = level.sz.parse::<Decimal>()?;
+                Ok(PriceLevel::new(price, size))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let asks: Vec<PriceLevel> = self.levels[1]
+            .iter()
+            .map::<Result<PriceLevel, rust_decimal::Error>, _>(|level: &Level| {
+                let price = level.px.parse::<Decimal>()?;
+                let size = level.sz.parse::<Decimal>()?;
+                Ok(PriceLevel::new(price, size))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let timestamp_ms = self.time as i64;
+
+        Ok(UnifiedOrderbook::from_levels(Exchange::Hyperliquid, symbol.to_string(), bids, asks, timestamp_ms))
     }
 }
 
