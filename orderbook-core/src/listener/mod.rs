@@ -18,7 +18,7 @@ use crate::{
 };
 use alloy::primitives::Address;
 use fs::File;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use notify::{Event, RecursiveMode, Watcher, recommended_watcher};
 use std::{
     cmp::Ordering,
@@ -199,24 +199,29 @@ fn fetch_snapshot(
 
 impl OrderBookListener {
     fn attempt_catch_up(&mut self, current_height: u64, target_height: u64) -> bool {
-        info!("Attempting catch-up: current_height={}, target_height={}, looking for range {}-{}",
-              current_height, target_height, current_height + 1, target_height);
-        
+        info!(
+            "Attempting catch-up: current_height={}, target_height={}, looking for range {}-{}",
+            current_height,
+            target_height,
+            current_height + 1,
+            target_height
+        );
+
         let events = self.event_buffer.get_events_in_range(current_height + 1, target_height);
-        
+
         if events.is_empty() {
             info!("No cached events found for missing blocks {} to {}", current_height + 1, target_height);
             return false;
         }
 
         info!("Found {} cached events for catch-up from {} to {}", events.len(), current_height + 1, target_height);
-        
+
         for (status_wrapper, diff_wrapper) in events {
             let status = status_wrapper.status;
             let diff = diff_wrapper.diff;
-            
+
             info!("Applying cached event at block {}", status_wrapper.block_number);
-            
+
             if let Some(state) = &mut self.order_book_state {
                 let status_batch = Batch::new(
                     status_wrapper.local_time.clone(),
@@ -230,18 +235,20 @@ impl OrderBookListener {
                     diff_wrapper.block_number,
                     vec![diff],
                 );
-                
+
                 if state.apply_single_update(status_batch, diff_batch).is_err() {
                     info!("Failed to apply cached update during catch-up");
                     return false;
                 }
             }
         }
-        
+
         let final_height = self.order_book_state.as_ref().map(|s| s.height()).unwrap_or(current_height);
-        info!("Catch-up completed: current_height={}, final_height={}, target_height={}",
-              current_height, final_height, target_height);
-        
+        info!(
+            "Catch-up completed: current_height={}, final_height={}, target_height={}",
+            current_height, final_height, target_height
+        );
+
         true
     }
 }
@@ -269,6 +276,7 @@ pub struct OrderBookListener {
     pending_updates: Vec<(Batch<NodeDataOrderStatus>, Batch<NodeDataOrderDiff>)>,
     gap_retry_count: u32,
     max_catch_up_blocks: u64,
+    file_offsets: HashMap<PathBuf, u64>,
 }
 
 impl OrderBookListener {
@@ -319,6 +327,7 @@ impl OrderBookListener {
             pending_updates: Vec::new(),
             gap_retry_count: 0,
             max_catch_up_blocks: 10,
+            file_offsets: HashMap::new(),
         }
     }
 
@@ -462,35 +471,47 @@ impl OrderBookListener {
             let apply_diff_batch = Batch::new(local_time.clone(), block_time.clone(), block_number, vec![diff.clone()]);
 
             let current_height = self.order_book_state.as_ref().map(|s| s.height());
-            
+
             if let Some(current_height) = current_height {
                 let update_height = block_number;
-                
+
                 if update_height > current_height + 1 {
                     let gap_size = update_height - current_height - 1;
-                    
-                    info!("Gap detection: current_height={}, update_height={}, gap_size={}, retry_count={}, max_catch_up={}",
-                          current_height, update_height, gap_size, self.gap_retry_count, self.max_catch_up_blocks);
-                    
+
+                    info!(
+                        "Gap detection: current_height={}, update_height={}, gap_size={}, retry_count={}, max_catch_up={}",
+                        current_height, update_height, gap_size, self.gap_retry_count, self.max_catch_up_blocks
+                    );
+
                     if gap_size <= 5 && self.gap_retry_count < 3 {
-                        info!("Small gap detected: current height {}, update height {}, gap size {}. Buffering update (retry {}).", 
-                              current_height, update_height, gap_size, self.gap_retry_count + 1);
+                        info!(
+                            "Small gap detected: current height {}, update height {}, gap size {}. Buffering update (retry {}).",
+                            current_height,
+                            update_height,
+                            gap_size,
+                            self.gap_retry_count + 1
+                        );
                         self.pending_updates.push((apply_status_batch.clone(), apply_diff_batch.clone()));
                         self.gap_retry_count += 1;
                         continue;
                     } else if gap_size <= self.max_catch_up_blocks {
-                        info!("Gap detected: current height {}, update height {}, gap size {}. Attempting catch-up.", 
-                              current_height, update_height, gap_size);
+                        info!(
+                            "Gap detected: current height {}, update height {}, gap size {}. Attempting catch-up.",
+                            current_height, update_height, gap_size
+                        );
                         let catch_up_successful = self.attempt_catch_up(current_height, update_height - 1);
-                        
+
                         let updated_height = self.order_book_state.as_ref().map_or(current_height, |s| s.height());
-                        
+
                         if catch_up_successful && updated_height + 1 == update_height {
                             info!("Catch-up successful, now at height {}", updated_height);
                             self.gap_retry_count = 0;
                         } else {
-                            info!("Catch-up {} (now at height {}). Triggering snapshot refetch.", 
-                                  if catch_up_successful { "partial" } else { "failed" }, updated_height);
+                            info!(
+                                "Catch-up {} (now at height {}). Triggering snapshot refetch.",
+                                if catch_up_successful { "partial" } else { "failed" },
+                                updated_height
+                            );
                             self.order_book_state = None;
                             self.fetched_snapshot_cache = None;
                             self.pending_updates.clear();
@@ -498,8 +519,10 @@ impl OrderBookListener {
                             continue;
                         }
                     } else {
-                        info!("Gap detected: current height {}, update height {}, gap size {} (exceeds max catch-up {}). Triggering snapshot refetch.", 
-                              current_height, update_height, gap_size, self.max_catch_up_blocks);
+                        info!(
+                            "Gap detected: current height {}, update height {}, gap size {} (exceeds max catch-up {}). Triggering snapshot refetch.",
+                            current_height, update_height, gap_size, self.max_catch_up_blocks
+                        );
                         self.order_book_state = None;
                         self.fetched_snapshot_cache = None;
                         self.pending_updates.clear();
@@ -508,10 +531,10 @@ impl OrderBookListener {
                     }
                 }
             }
-            
+
             if let Some(state) = &mut self.order_book_state {
                 let coin = status.order.coin.clone();
-                
+
                 match state.apply_single_update(apply_status_batch, apply_diff_batch.clone()) {
                     Ok(()) => {
                         self.gap_retry_count = 0;
@@ -569,8 +592,11 @@ impl OrderBookListener {
             while let Some((order_statuses, order_diffs)) = cache.pop_front() {
                 let update_height = order_statuses.block_number();
                 if update_height > new_order_book.height() + 1 {
-                    info!("Update at block {} is too far ahead of snapshot at block {}, waiting for newer snapshot",
-                          update_height, new_order_book.height());
+                    info!(
+                        "Update at block {} is too far ahead of snapshot at block {}, waiting for newer snapshot",
+                        update_height,
+                        new_order_book.height()
+                    );
                     retry = true;
                     break;
                 }
@@ -598,7 +624,7 @@ impl OrderBookListener {
 
         if !retry {
             self.order_book_state = Some(new_order_book);
-            
+
             if !self.pending_updates.is_empty() {
                 info!("Applying {} pending updates after snapshot initialization", self.pending_updates.len());
                 let mut pending_to_keep = Vec::new();
@@ -615,7 +641,7 @@ impl OrderBookListener {
                 }
                 self.pending_updates = pending_to_keep;
             }
-            
+
             self.gap_retry_count = 0;
             info!("Order book ready");
         }
@@ -727,23 +753,58 @@ impl OrderBookListener {
     fn process_update(&mut self, event: &Event, new_path: &PathBuf, event_source: EventSource) -> Result<()> {
         if event.kind.is_create() {
             info!("-- Event: {} created --", new_path.display());
-            self.on_file_creation(new_path.clone(), event_source)?;
+            self.file_offsets.insert(new_path.clone(), 0);
+            self.on_file_creation_with_path(new_path.clone(), event_source)?;
+        } else if event.kind.is_modify() {
+            self.on_file_modification_with_path(new_path, event_source)?;
         }
-        // Check for `Modify` event (only if the file is already initialized)
-        else {
-            // If we are not tracking anything right now, we treat a file update as declaring that it has been created.
-            // Unfortunately, we miss the update that occurs at this time step.
-            // We go to the end of the file to read for updates after that.
-            if self.is_reading(event_source) {
-                self.on_file_modification(event_source)?;
-            } else {
-                info!("-- Event: {} modified, tracking it now --", new_path.display());
-                let file = self.file_mut(event_source);
-                let mut new_file = File::open(new_path)?;
-                new_file.seek(SeekFrom::End(0))?;
-                *file = Some(new_file);
-            }
+        Ok(())
+    }
+
+    fn on_file_creation_with_path(&mut self, new_file: PathBuf, event_source: EventSource) -> Result<()> {
+        let mut new_file_handle = File::open(&new_file)?;
+        let mut buf = String::new();
+        new_file_handle.read_to_string(&mut buf)?;
+
+        if !buf.is_empty() {
+            let offset = buf.len() as u64;
+            self.file_offsets.insert(new_file.clone(), offset);
+            self.process_data(buf, event_source)?;
+        } else {
+            self.file_offsets.insert(new_file.clone(), 0);
         }
+
+        self.file_mut(event_source).as_mut().map(|f| *f = new_file_handle);
+        Ok(())
+    }
+
+    fn on_file_modification_with_path(&mut self, path: &PathBuf, event_source: EventSource) -> Result<()> {
+        let current_offset = *self.file_offsets.get(path).unwrap_or(&0u64);
+        let mut file = File::open(path)?;
+        file.seek(SeekFrom::Start(current_offset))?;
+
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer)?;
+
+        if buffer.is_empty() {
+            return Ok(());
+        }
+
+        let bytes_read = buffer.len() as u64;
+        let new_offset = current_offset + bytes_read;
+        self.file_offsets.insert(path.clone(), new_offset);
+
+        let data_str = String::from_utf8_lossy(&buffer);
+
+        debug!(
+            "File read: path={}, prev_offset={}, bytes_read={}, lines_emitted={}",
+            path.display(),
+            current_offset,
+            bytes_read,
+            data_str.lines().filter(|l| !l.is_empty()).count()
+        );
+        self.process_data(data_str.to_string(), event_source)?;
+
         Ok(())
     }
 }
@@ -764,7 +825,6 @@ impl DirectoryListener for OrderBookListener {
             EventSource::OrderDiffs => &mut self.order_diff_file,
         }
     }
-
     fn on_file_creation(&mut self, new_file: PathBuf, event_source: EventSource) -> Result<()> {
         if let Some(file) = self.file_mut(event_source).as_mut() {
             let mut buf = String::new();
@@ -843,7 +903,6 @@ impl DirectoryListener for OrderBookListener {
             self.emit_and_publish_l2((time, l2_snapshots));
             self.streaming_metrics.record_l2_update();
         }
-        self.process_pending_l2_updates();
 
         Ok(())
     }
@@ -875,4 +934,22 @@ pub enum InternalMessage {
 pub struct L2SnapshotParams {
     pub n_sig_figs: Option<u32>,
     pub mantissa: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_offset_tracking_initialization() {
+        let mut listener = OrderBookListener::new_with_streaming(None, false, None, None, None, true, Some(50), None);
+
+        let path = PathBuf::from("/test/path.jsonl");
+        assert_eq!(listener.file_offsets.get(&path), None);
+
+        let offset = 100;
+        listener.file_offsets.insert(path.clone(), offset);
+        assert_eq!(listener.file_offsets.get(&path), Some(&offset));
+    }
 }
