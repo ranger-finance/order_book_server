@@ -91,27 +91,41 @@ impl L2Emitter {
     ) -> Result<(), RedisError> {
         self.block_height = block_height;
 
-        if self.should_emit_for_coin(symbol) {
-            let mut published = false;
-
-            if let Some(prev_book) = self.cache.get(symbol) {
-                if self.has_changes(&prev_book, book) {
-                    self.redis_publisher.publish_orderbook(Exchange::Hyperliquid, symbol, book).await?;
-                    published = true;
-                }
+        let mut published = false;
+        let emit_reason = if let Some(prev_book) = self.cache.get(symbol) {
+            if self.has_changes(&prev_book, book) {
+                (true, "changes detected")
             } else {
-                self.redis_publisher.publish_orderbook(Exchange::Hyperliquid, symbol, book).await?;
+                (false, "no changes")
+            }
+        } else {
+            (true, "first publish")
+        };
+
+        if emit_reason.0 {
+            self.redis_publisher.publish_orderbook(Exchange::Hyperliquid, symbol, book).await?;
+            if self.should_emit_for_coin(symbol) {
                 self.last_snapshot_block.insert(symbol.to_string(), block_height);
                 self.update_emit_time();
-                published = true;
+                log::info!("Incremental L2 update for {}: redis published (reason: {}, block: {})", 
+                    symbol, emit_reason.1, block_height);
+            } else {
+                log::info!("Incremental L2 update for {}: redis published (reason: {}, block: {}, time throttled - publishing changes anyway)", 
+                    symbol, emit_reason.1, block_height);
             }
-
-            if published {
-                self.redis_publisher.publish_update_notification(Exchange::Hyperliquid, symbol).await?;
-            }
-
-            self.cache.put(symbol.to_string(), book.clone());
+            published = true;
+        } else {
+            log::debug!("Incremental L2 update for {}: skipped (reason: {}, block: {})", 
+                symbol, emit_reason.1, block_height);
         }
+
+        if published {
+            if let Err(e) = self.redis_publisher.publish_update_notification(Exchange::Hyperliquid, symbol).await {
+                log::error!("Failed to publish update notification for {}: {}", symbol, e);
+            }
+        }
+
+        self.cache.put(symbol.to_string(), book.clone());
 
         Ok(())
     }
