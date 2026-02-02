@@ -2,8 +2,10 @@
 use clap::Parser;
 use futures_util::{sink::SinkExt, stream::StreamExt};
 use orderbook_core::{
-    Exchange, UnifiedOrderbook, redis::config::RedisConfig, redis::consumer::RedisConsumer,
+    Exchange, redis::config::RedisConfig, redis::consumer::RedisConsumer,
 };
+use orderbook_normaliser::{OrderbookAnalyzer};
+use orderbook_normaliser::models::OrderbookUpdate;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -34,7 +36,7 @@ struct ClientMessage {
 #[serde(tag = "type")]
 enum ServerMessage {
     #[serde(rename = "snapshot")]
-    Snapshot { data: UnifiedOrderbook },
+    Snapshot { data: OrderbookUpdate },
     #[serde(rename = "subscribed")]
     Subscribed { exchange: Exchange, symbol: String },
     #[serde(rename = "unsubscribed")]
@@ -139,11 +141,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn({
         let consumer = Arc::clone(&redis_consumer);
         let manager = Arc::clone(&client_manager);
+        let analyzer = OrderbookAnalyzer::with_default_config();
 
         async move {
             while let Some((exchange, symbol)) = update_rx.recv().await {
                 if let Ok(Some(book)) = consumer.get_orderbook(exchange, &symbol).await {
-                    let response = ServerMessage::Snapshot { data: book };
+                    let analysis = analyzer.analyze(&book);
+                    let update = OrderbookUpdate { orderbook: book, analysis };
+                    let response = ServerMessage::Snapshot { data: update };
 
                     let json = match serde_json::to_string(&response) {
                         Ok(j) => j,
@@ -183,6 +188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let manager_for_task = Arc::clone(&client_manager);
         let consumer_for_task = Arc::clone(&redis_consumer);
+        let analyzer_for_task = OrderbookAnalyzer::with_default_config();
 
         tokio::spawn(async move {
             let client_id = client_id.clone();
@@ -216,8 +222,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                             }
 
                                                             if let Ok(Some(book)) = consumer_for_task.get_orderbook(exchange, &symbol).await {
+                                                                let analysis = analyzer_for_task.analyze(&book);
+                                                                let update = OrderbookUpdate { orderbook: book, analysis };
                                                                 let response = ServerMessage::Snapshot {
-                                                                    data: book,
+                                                                    data: update,
                                                                 };
 
                                                                 if let Ok(json) = serde_json::to_string(&response) {

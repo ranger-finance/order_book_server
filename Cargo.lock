@@ -1287,6 +1287,7 @@ dependencies = [
  "futures-util",
  "lapin",
  "orderbook-core",
+ "orderbook-normaliser",
  "serde",
  "serde_json",
  "server",
