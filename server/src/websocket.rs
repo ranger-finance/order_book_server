@@ -127,6 +127,7 @@ pub async fn run_websocket_server(
     compression_level: u32,
     redis_url: Option<&str>,
     allowed_coins: &Vec<String>,
+    max_levels: usize,
 ) -> super::Result<()> {
     let (internal_message_tx, _) = channel::<Arc<InternalMessage>>(100);
 
@@ -153,7 +154,7 @@ pub async fn run_websocket_server(
     let home_dir = dirs::home_dir().ok_or("Could not find home directory")?;
     let listener = {
         let internal_message_tx = internal_message_tx.clone();
-        OrderBookListener::new(Some(internal_message_tx), ignore_spot, redis_publisher, Some(allowed_coins))
+        OrderBookListener::new(Some(internal_message_tx), ignore_spot, redis_publisher, Some(allowed_coins), max_levels)
     };
     let listener = Arc::new(Mutex::new(listener));
 
