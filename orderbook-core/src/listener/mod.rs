@@ -197,6 +197,55 @@ fn fetch_snapshot(
     });
 }
 
+impl OrderBookListener {
+    fn attempt_catch_up(&mut self, current_height: u64, target_height: u64) -> bool {
+        info!("Attempting catch-up: current_height={}, target_height={}, looking for range {}-{}",
+              current_height, target_height, current_height + 1, target_height);
+        
+        let events = self.event_buffer.get_events_in_range(current_height + 1, target_height);
+        
+        if events.is_empty() {
+            info!("No cached events found for missing blocks {} to {}", current_height + 1, target_height);
+            return false;
+        }
+
+        info!("Found {} cached events for catch-up from {} to {}", events.len(), current_height + 1, target_height);
+        
+        for (status_wrapper, diff_wrapper) in events {
+            let status = status_wrapper.status;
+            let diff = diff_wrapper.diff;
+            
+            info!("Applying cached event at block {}", status_wrapper.block_number);
+            
+            if let Some(state) = &mut self.order_book_state {
+                let status_batch = Batch::new(
+                    status_wrapper.local_time.clone(),
+                    status_wrapper.block_time.clone(),
+                    status_wrapper.block_number,
+                    vec![status],
+                );
+                let diff_batch = Batch::new(
+                    diff_wrapper.local_time.clone(),
+                    diff_wrapper.block_time.clone(),
+                    diff_wrapper.block_number,
+                    vec![diff],
+                );
+                
+                if state.apply_single_update(status_batch, diff_batch).is_err() {
+                    info!("Failed to apply cached update during catch-up");
+                    return false;
+                }
+            }
+        }
+        
+        let final_height = self.order_book_state.as_ref().map(|s| s.height()).unwrap_or(current_height);
+        info!("Catch-up completed: current_height={}, final_height={}, target_height={}",
+              current_height, final_height, target_height);
+        
+        true
+    }
+}
+
 pub struct OrderBookListener {
     pub ignore_spot: bool,
     max_bids: Option<usize>,
@@ -217,6 +266,9 @@ pub struct OrderBookListener {
     affected_coins: HashSet<Coin>,
     pending_l2_coins: Vec<Coin>,
     streaming_metrics: StreamingMetrics,
+    pending_updates: Vec<(Batch<NodeDataOrderStatus>, Batch<NodeDataOrderDiff>)>,
+    gap_retry_count: u32,
+    max_catch_up_blocks: u64,
 }
 
 impl OrderBookListener {
@@ -264,6 +316,9 @@ impl OrderBookListener {
             affected_coins: HashSet::new(),
             pending_l2_coins: Vec::new(),
             streaming_metrics: StreamingMetrics::new(),
+            pending_updates: Vec::new(),
+            gap_retry_count: 0,
+            max_catch_up_blocks: 10,
         }
     }
 
@@ -383,7 +438,8 @@ impl OrderBookListener {
         self.streaming_metrics.update_buffer_sizes(self.event_buffer.status_count(), self.event_buffer.diff_count());
 
         self.try_process_buffered_events()?;
-        self.event_buffer.flush_old_events();
+        let current_height = self.order_book_state.as_ref().map(|s| s.height());
+        self.event_buffer.flush_old_events(current_height);
 
         self.maybe_log_metrics();
 
@@ -405,21 +461,60 @@ impl OrderBookListener {
                 Batch::new(local_time.clone(), block_time.clone(), block_number, vec![status.clone()]);
             let apply_diff_batch = Batch::new(local_time.clone(), block_time.clone(), block_number, vec![diff.clone()]);
 
-            if let Some(state) = &mut self.order_book_state {
-                let coin = status.order.coin.clone();
-                let current_height = state.height();
+            let current_height = self.order_book_state.as_ref().map(|s| s.height());
+            
+            if let Some(current_height) = current_height {
                 let update_height = block_number;
                 
                 if update_height > current_height + 1 {
-                    info!("Gap detected: current height {}, update height {}. Triggering snapshot refetch.", 
-                          current_height, update_height);
-                    self.order_book_state = None;
-                    self.fetched_snapshot_cache = None;
-                    continue;
+                    let gap_size = update_height - current_height - 1;
+                    
+                    info!("Gap detection: current_height={}, update_height={}, gap_size={}, retry_count={}, max_catch_up={}",
+                          current_height, update_height, gap_size, self.gap_retry_count, self.max_catch_up_blocks);
+                    
+                    if gap_size <= 5 && self.gap_retry_count < 3 {
+                        info!("Small gap detected: current height {}, update height {}, gap size {}. Buffering update (retry {}).", 
+                              current_height, update_height, gap_size, self.gap_retry_count + 1);
+                        self.pending_updates.push((apply_status_batch.clone(), apply_diff_batch.clone()));
+                        self.gap_retry_count += 1;
+                        continue;
+                    } else if gap_size <= self.max_catch_up_blocks {
+                        info!("Gap detected: current height {}, update height {}, gap size {}. Attempting catch-up.", 
+                              current_height, update_height, gap_size);
+                        let catch_up_successful = self.attempt_catch_up(current_height, update_height - 1);
+                        
+                        let updated_height = self.order_book_state.as_ref().map_or(current_height, |s| s.height());
+                        
+                        if catch_up_successful && updated_height + 1 == update_height {
+                            info!("Catch-up successful, now at height {}", updated_height);
+                            self.gap_retry_count = 0;
+                        } else {
+                            info!("Catch-up {} (now at height {}). Triggering snapshot refetch.", 
+                                  if catch_up_successful { "partial" } else { "failed" }, updated_height);
+                            self.order_book_state = None;
+                            self.fetched_snapshot_cache = None;
+                            self.pending_updates.clear();
+                            self.gap_retry_count = 0;
+                            continue;
+                        }
+                    } else {
+                        info!("Gap detected: current height {}, update height {}, gap size {} (exceeds max catch-up {}). Triggering snapshot refetch.", 
+                              current_height, update_height, gap_size, self.max_catch_up_blocks);
+                        self.order_book_state = None;
+                        self.fetched_snapshot_cache = None;
+                        self.pending_updates.clear();
+                        self.gap_retry_count = 0;
+                        continue;
+                    }
                 }
+            }
+            
+            if let Some(state) = &mut self.order_book_state {
+                let coin = status.order.coin.clone();
                 
                 match state.apply_single_update(apply_status_batch, apply_diff_batch.clone()) {
                     Ok(()) => {
+                        self.gap_retry_count = 0;
                         if let Some(cache) = &mut self.fetched_snapshot_cache {
                             let cache_status_batch =
                                 Batch::new(local_time.clone(), block_time.clone(), block_number, vec![status.clone()]);
@@ -503,6 +598,25 @@ impl OrderBookListener {
 
         if !retry {
             self.order_book_state = Some(new_order_book);
+            
+            if !self.pending_updates.is_empty() {
+                info!("Applying {} pending updates after snapshot initialization", self.pending_updates.len());
+                let mut pending_to_keep = Vec::new();
+                for (status_batch, diff_batch) in std::mem::take(&mut self.pending_updates) {
+                    let update_height = status_batch.block_number();
+                    if let Some(ref mut state) = self.order_book_state {
+                        if update_height > state.height() + 1 || update_height <= state.height() {
+                            pending_to_keep.push((status_batch, diff_batch));
+                        } else if state.apply_updates(status_batch.clone(), diff_batch.clone()).is_err() {
+                            info!("Failed to apply pending update at block {}. Re-buffering.", update_height);
+                            pending_to_keep.push((status_batch, diff_batch));
+                        }
+                    }
+                }
+                self.pending_updates = pending_to_keep;
+            }
+            
+            self.gap_retry_count = 0;
             info!("Order book ready");
         }
     }

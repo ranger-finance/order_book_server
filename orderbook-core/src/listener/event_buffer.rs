@@ -68,11 +68,54 @@ impl EventBuffer {
         matched
     }
 
-    pub fn flush_old_events(&mut self) {
+    pub fn flush_old_events(&mut self, current_height: Option<u64>) {
         let now = Instant::now();
-        if now.duration_since(self.last_process_time).as_millis() > self.buffer_window_ms as u128 {
-            self.order_status_buffer.clear();
-            self.order_diff_buffer.clear();
+        let time_window_expired =
+            now.duration_since(self.last_process_time).as_millis() > self.buffer_window_ms as u128;
+
+        if time_window_expired {
+            let status_before = self.order_status_buffer.len();
+            let diff_before = self.order_diff_buffer.len();
+            let mut status_to_remove = Vec::new();
+            let mut diff_to_remove = Vec::new();
+
+            for (key, status) in &self.order_status_buffer {
+                let should_keep = if let Some(h) = current_height { status.block_number >= h } else { true };
+
+                if !should_keep {
+                    status_to_remove.push(key.clone());
+                }
+            }
+
+            for (key, diff) in &self.order_diff_buffer {
+                let should_keep = if let Some(h) = current_height { diff.block_number >= h } else { true };
+
+                if !should_keep {
+                    diff_to_remove.push(key.clone());
+                }
+            }
+
+            let status_removed_count = status_to_remove.len();
+            let diff_removed_count = diff_to_remove.len();
+
+            for key in status_to_remove {
+                self.order_status_buffer.remove(&key);
+            }
+
+            for key in diff_to_remove {
+                self.order_diff_buffer.remove(&key);
+            }
+
+            let status_after = self.order_status_buffer.len();
+            let diff_after = self.order_diff_buffer.len();
+
+            if status_removed_count > 0 || diff_removed_count > 0 {
+                log::info!("Pruned event buffer: status {} -> {} (removed {}), diff {} -> {} (removed {}), current_height: {:?}",
+                          status_before, status_after, status_removed_count,
+                          diff_before, diff_after, diff_removed_count,
+                          current_height);
+            }
+
             self.last_process_time = now;
         }
     }
@@ -83,5 +126,33 @@ impl EventBuffer {
 
     pub fn diff_count(&self) -> usize {
         self.order_diff_buffer.len()
+    }
+
+    pub fn get_events_in_range(
+        &self,
+        start_height: u64,
+        end_height: u64,
+    ) -> Vec<(OrderStatusWrapper, OrderDiffWrapper)> {
+        let mut matched = Vec::new();
+
+        log::debug!(
+            "get_events_in_range: looking for events in [{}, {}], buffer has {} statuses, {} diffs",
+            start_height,
+            end_height,
+            self.order_status_buffer.len(),
+            self.order_diff_buffer.len()
+        );
+
+        for (key, status) in &self.order_status_buffer {
+            let block_number = status.block_number;
+            if block_number >= start_height && block_number <= end_height {
+                if let Some(diff) = self.order_diff_buffer.get(key) {
+                    matched.push((status.clone(), diff.clone()));
+                }
+            }
+        }
+
+        log::debug!("get_events_in_range: returning {} matched events", matched.len());
+        matched
     }
 }
