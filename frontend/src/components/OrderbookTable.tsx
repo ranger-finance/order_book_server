@@ -14,8 +14,14 @@ export function OrderbookTable({ data, maxLevels = 20 }: OrderbookTableProps) {
     const asks = data.orderbook.asks.slice(0, maxLevels);
 
     // Calculate total volume for depth visualization
-    const totalBidSize = bids.reduce((acc, level) => acc + normalizeSize(level.size, data.orderbook.exchange), 0);
-    const totalAskSize = asks.reduce((acc, level) => acc + normalizeSize(level.size, data.orderbook.exchange), 0);
+    const totalBidSize = bids.reduce(
+      (acc, level) => acc + normalizeSize(level.size, data.orderbook.exchange),
+      0,
+    );
+    const totalAskSize = asks.reduce(
+      (acc, level) => acc + normalizeSize(level.size, data.orderbook.exchange),
+      0,
+    );
     const maxTotal = Math.max(totalBidSize, totalAskSize);
 
     return { bids, asks, maxTotal };
@@ -54,8 +60,12 @@ export function OrderbookTable({ data, maxLevels = 20 }: OrderbookTableProps) {
                   backgroundColor: "rgba(0, 200, 83, 0.15)",
                 }}
               />
-              <span className="size">{formatSize(level.size, data.orderbook.exchange)}</span>
-              <span className="price">{formatPrice(level.price, data.orderbook.exchange)}</span>
+              <span className="size">
+                {formatSize(level.size, data.orderbook.exchange)}
+              </span>
+              <span className="price">
+                {formatPrice(level.price, data.orderbook.exchange)}
+              </span>
             </div>
           ))}
         </div>
@@ -63,10 +73,14 @@ export function OrderbookTable({ data, maxLevels = 20 }: OrderbookTableProps) {
         <div className="spread-display">
           <span className="spread-label">Spread</span>
           <span className="spread-value">
-            {stats.spread ? formatPrice(stats.spread, data.orderbook.exchange) : "-"}
+            {stats.spread
+              ? formatPrice(stats.spread, data.orderbook.exchange)
+              : "-"}
           </span>
           <span className="spread-bps">
-            {stats.spread_bps ? `(${parseFloat(stats.spread_bps).toFixed(2)} bps)` : ""}
+            {stats.spread_bps
+              ? `(${parseFloat(stats.spread_bps).toFixed(2)} bps)`
+              : ""}
           </span>
         </div>
 
@@ -86,8 +100,12 @@ export function OrderbookTable({ data, maxLevels = 20 }: OrderbookTableProps) {
                   backgroundColor: "rgba(255, 82, 82, 0.15)",
                 }}
               />
-              <span className="price">{formatPrice(level.price, data.orderbook.exchange)}</span>
-              <span className="size">{formatSize(level.size, data.orderbook.exchange)}</span>
+              <span className="price">
+                {formatPrice(level.price, data.orderbook.exchange)}
+              </span>
+              <span className="size">
+                {formatSize(level.size, data.orderbook.exchange)}
+              </span>
             </div>
           ))}
         </div>

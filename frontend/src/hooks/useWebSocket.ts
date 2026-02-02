@@ -96,11 +96,7 @@ export function useWebSocket(
           const currentExchange = exchangeRef.current;
           const currentToken = tokenRef.current;
           if (currentExchange !== "all" && currentToken !== "all") {
-            let symbol = currentToken;
-            if (currentExchange === "drift") {
-              symbol += "-PERP";
-            }
-            subscribe(currentExchange, symbol);
+            subscribe(currentExchange, currentToken);
           }
         };
 
