@@ -1,7 +1,5 @@
 import { useState } from "react";
 import { useWebSocket } from "./hooks/useWebSocket";
-import { DepthChart } from "./components/DepthChart";
-import { LiquidityHistogram } from "./components/LiquidityHistogram";
 import { OrderbookTable } from "./components/OrderbookTable";
 import type { Exchange, Token } from "./types";
 import { AVAILABLE_TOKENS } from "./types";

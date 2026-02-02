@@ -1,30 +1,28 @@
 import { useMemo } from "react";
 import { motion } from "motion/react";
-import type { OrderbookUpdate, PriceLevel } from "../types";
+import type { OrderbookUpdate } from "../types";
+import { formatPrice, formatSize, normalizeSize } from "../utils/precision";
 
 interface OrderbookTableProps {
   data: OrderbookUpdate;
   maxLevels?: number;
 }
 
-export function OrderbookTable({ data, maxLevels = 10 }: OrderbookTableProps) {
+export function OrderbookTable({ data, maxLevels = 20 }: OrderbookTableProps) {
   const { bids, asks, maxTotal } = useMemo(() => {
     const bids = data.orderbook.bids.slice(0, maxLevels);
     const asks = data.orderbook.asks.slice(0, maxLevels);
 
     // Calculate total volume for depth visualization
-    const totalBidSize = bids.reduce((acc, level) => acc + parseFloat(level.size), 0);
-    const totalAskSize = asks.reduce((acc, level) => acc + parseFloat(level.size), 0);
+    const totalBidSize = bids.reduce((acc, level) => acc + normalizeSize(level.size, data.orderbook.exchange), 0);
+    const totalAskSize = asks.reduce((acc, level) => acc + normalizeSize(level.size, data.orderbook.exchange), 0);
     const maxTotal = Math.max(totalBidSize, totalAskSize);
 
     return { bids, asks, maxTotal };
   }, [data, maxLevels]);
 
-  const formatPrice = (level: PriceLevel) => parseFloat(level.price).toFixed(2);
-  const formatSize = (level: PriceLevel) => parseFloat(level.size).toFixed(4);
-
   const getDepthWidth = (size: string) => {
-    const numericSize = parseFloat(size);
+    const numericSize = normalizeSize(size, data.orderbook.exchange);
     const percentage = maxTotal > 0 ? (numericSize / maxTotal) * 100 : 0;
     // Multiply by 5 to make bars more visible, cap at 100%
     return `${Math.min(percentage * 5, 100)}%`;
@@ -56,8 +54,8 @@ export function OrderbookTable({ data, maxLevels = 10 }: OrderbookTableProps) {
                   backgroundColor: "rgba(0, 200, 83, 0.15)",
                 }}
               />
-              <span className="size">{formatSize(level)}</span>
-              <span className="price">{formatPrice(level)}</span>
+              <span className="size">{formatSize(level.size, data.orderbook.exchange)}</span>
+              <span className="price">{formatPrice(level.price, data.orderbook.exchange)}</span>
             </div>
           ))}
         </div>
@@ -65,7 +63,7 @@ export function OrderbookTable({ data, maxLevels = 10 }: OrderbookTableProps) {
         <div className="spread-display">
           <span className="spread-label">Spread</span>
           <span className="spread-value">
-            {stats.spread ? parseFloat(stats.spread).toFixed(2) : "-"}
+            {stats.spread ? formatPrice(stats.spread, data.orderbook.exchange) : "-"}
           </span>
           <span className="spread-bps">
             {stats.spread_bps ? `(${parseFloat(stats.spread_bps).toFixed(2)} bps)` : ""}
@@ -88,8 +86,8 @@ export function OrderbookTable({ data, maxLevels = 10 }: OrderbookTableProps) {
                   backgroundColor: "rgba(255, 82, 82, 0.15)",
                 }}
               />
-              <span className="price">{formatPrice(level)}</span>
-              <span className="size">{formatSize(level)}</span>
+              <span className="price">{formatPrice(level.price, data.orderbook.exchange)}</span>
+              <span className="size">{formatSize(level.size, data.orderbook.exchange)}</span>
             </div>
           ))}
         </div>

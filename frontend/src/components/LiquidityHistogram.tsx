@@ -11,6 +11,7 @@ import {
   Cell,
 } from "recharts";
 import type { OrderbookUpdate } from "../types";
+import { normalizePrice, normalizeSize } from "../utils/precision";
 
 interface LiquidityHistogramProps {
   data: OrderbookUpdate;
@@ -26,17 +27,17 @@ interface HistogramDataPoint {
 function LiquidityHistogramInner({ data }: LiquidityHistogramProps) {
   const chartData = useMemo(() => {
     const { liquidity_distribution, oracle_curve } = data.analysis;
-    const midPrice = parseFloat(oracle_curve.reference_price);
+    const midPrice = normalizePrice(oracle_curve.reference_price, data.orderbook.exchange);
 
     const points: HistogramDataPoint[] = liquidity_distribution.map((bucket) => {
-      const priceLow = parseFloat(bucket.price_low);
-      const priceHigh = parseFloat(bucket.price_high);
+      const priceLow = normalizePrice(bucket.price_low, data.orderbook.exchange);
+      const priceHigh = normalizePrice(bucket.price_high, data.orderbook.exchange);
       const midBucket = (priceLow + priceHigh) / 2;
 
       return {
         priceRange: `${priceLow.toFixed(2)}-${priceHigh.toFixed(2)}`,
         price: midBucket,
-        liquidity: parseFloat(bucket.liquidity),
+        liquidity: normalizeSize(bucket.liquidity, data.orderbook.exchange),
         isBid: bucket.is_bid,
       };
     });
@@ -59,7 +60,7 @@ function LiquidityHistogramInner({ data }: LiquidityHistogramProps) {
       <div className="stats-row">
         <div className="stat">
           <span className="label">Bid Liquidity</span>
-          <span className="value bid">{parseFloat(stats.total_bid_liquidity).toFixed(2)}</span>
+          <span className="value bid">{normalizeSize(stats.total_bid_liquidity, data.orderbook.exchange).toFixed(2)}</span>
         </div>
         <div className="stat">
           <span className="label">Imbalance</span>
@@ -69,7 +70,7 @@ function LiquidityHistogramInner({ data }: LiquidityHistogramProps) {
         </div>
         <div className="stat">
           <span className="label">Ask Liquidity</span>
-          <span className="value ask">{parseFloat(stats.total_ask_liquidity).toFixed(2)}</span>
+          <span className="value ask">{normalizeSize(stats.total_ask_liquidity, data.orderbook.exchange).toFixed(2)}</span>
         </div>
       </div>
 

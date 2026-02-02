@@ -10,6 +10,7 @@ import {
   ReferenceLine,
 } from "recharts";
 import type { OrderbookUpdate } from "../types";
+import { normalizePrice, normalizeSize } from "../utils/precision";
 
 interface DepthChartProps {
   data: OrderbookUpdate;
@@ -24,15 +25,15 @@ interface DepthDataPoint {
 function DepthChartInner({ data }: DepthChartProps) {
   const chartData = useMemo(() => {
     const { oracle_curve } = data.analysis;
-    const midPrice = parseFloat(oracle_curve.reference_price);
+    const midPrice = normalizePrice(oracle_curve.reference_price, data.orderbook.exchange);
 
     const points: DepthDataPoint[] = [];
 
     // Add bid curve points (in reverse order for proper visualization)
     [...oracle_curve.bid_curve].reverse().forEach((point) => {
       points.push({
-        price: parseFloat(point.price),
-        bidDepth: parseFloat(point.cumulative_depth),
+        price: normalizePrice(point.price, data.orderbook.exchange),
+        bidDepth: normalizeSize(point.cumulative_depth, data.orderbook.exchange),
         askDepth: null,
       });
     });
@@ -40,9 +41,9 @@ function DepthChartInner({ data }: DepthChartProps) {
     // Add ask curve points
     oracle_curve.ask_curve.forEach((point) => {
       points.push({
-        price: parseFloat(point.price),
+        price: normalizePrice(point.price, data.orderbook.exchange),
         bidDepth: null,
-        askDepth: parseFloat(point.cumulative_depth),
+        askDepth: normalizeSize(point.cumulative_depth, data.orderbook.exchange),
       });
     });
 
@@ -65,7 +66,7 @@ function DepthChartInner({ data }: DepthChartProps) {
         <div className="stat">
           <span className="label">Best Bid</span>
           <span className="value bid">
-            {stats.best_bid ? parseFloat(stats.best_bid).toFixed(2) : "-"}
+            {stats.best_bid ? normalizePrice(stats.best_bid, data.orderbook.exchange).toFixed(2) : "-"}
           </span>
         </div>
         <div className="stat">
@@ -77,7 +78,7 @@ function DepthChartInner({ data }: DepthChartProps) {
         <div className="stat">
           <span className="label">Best Ask</span>
           <span className="value ask">
-            {stats.best_ask ? parseFloat(stats.best_ask).toFixed(2) : "-"}
+            {stats.best_ask ? normalizePrice(stats.best_ask, data.orderbook.exchange).toFixed(2) : "-"}
           </span>
         </div>
       </div>
