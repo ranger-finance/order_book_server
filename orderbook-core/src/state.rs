@@ -1,7 +1,7 @@
 use log::{error, info};
 
 use crate::{
-    listener::{utils::compute_l2_snapshots, L2Snapshots, TimedSnapshots},
+    listener::{utils::compute_l2_snapshots_with_max_levels, L2Snapshots, TimedSnapshots},
     orderbook::{
         multi_book::{OrderBooks, Snapshots},
         Coin, InnerOrder, Oid,
@@ -21,11 +21,12 @@ pub struct OrderBookState {
     time: u64,
     snapped: bool,
     ignore_spot: bool,
+    max_levels: usize,
 }
 
 impl OrderBookState {
-    pub fn new(ignore_spot: bool) -> Self {
-        Self { order_book: OrderBooks::new(), height: 0, time: 0, snapped: false, ignore_spot }
+    pub fn new(ignore_spot: bool, max_levels: usize) -> Self {
+        Self { order_book: OrderBooks::new(), height: 0, time: 0, snapped: false, ignore_spot, max_levels }
     }
 
     pub fn from_snapshot(
@@ -34,6 +35,7 @@ impl OrderBookState {
         time: u64,
         ignore_triggers: bool,
         ignore_spot: bool,
+        max_levels: usize,
     ) -> Self {
         Self {
             ignore_spot,
@@ -41,6 +43,7 @@ impl OrderBookState {
             height,
             order_book: OrderBooks::from_snapshots(snapshot, ignore_triggers),
             snapped: false,
+            max_levels,
         }
     }
 
@@ -59,7 +62,7 @@ impl OrderBookState {
             None
         } else {
             self.snapped = prevent_future_snaps || self.snapped;
-            Some((self.time, compute_l2_snapshots(&self.order_book)))
+            Some((self.time, compute_l2_snapshots_with_max_levels(&self.order_book, self.max_levels)))
         }
     }
 

@@ -85,17 +85,24 @@ impl L2SnapshotParams {
 }
 
 pub fn compute_l2_snapshots<O: InnerOrder + Send + Sync>(order_books: &OrderBooks<O>) -> L2Snapshots {
+    compute_l2_snapshots_with_max_levels(order_books, 50)
+}
+
+pub fn compute_l2_snapshots_with_max_levels<O: InnerOrder + Send + Sync>(
+    order_books: &OrderBooks<O>,
+    max_levels: usize,
+) -> L2Snapshots {
     L2Snapshots(
         order_books
             .as_ref()
             .par_iter()
             .map(|(coin, order_book)| {
                 let mut entries = Vec::new();
-                let snapshot = order_book.to_l2_snapshot(None, None, None);
+                let snapshot = order_book.to_l2_snapshot(Some(max_levels), None, None);
                 entries.push((L2SnapshotParams { n_sig_figs: None, mantissa: None }, snapshot));
                 let mut add_new_snapshot = |n_sig_figs: Option<u32>, mantissa: Option<u64>, idx: usize| {
                     if let Some((_, last_snapshot)) = &entries.get(entries.len() - idx) {
-                        let snapshot = last_snapshot.to_l2_snapshot(None, n_sig_figs, mantissa);
+                        let snapshot = last_snapshot.to_l2_snapshot(Some(max_levels), n_sig_figs, mantissa);
                         entries.push((L2SnapshotParams { n_sig_figs, mantissa }, snapshot));
                     }
                 };
@@ -103,7 +110,6 @@ pub fn compute_l2_snapshots<O: InnerOrder + Send + Sync>(order_books: &OrderBook
                     if n_sig_figs == 5 {
                         for mantissa in [None, Some(2), Some(5)] {
                             if mantissa == Some(5) {
-                                // Some(2) is NOT a superset of this info!
                                 add_new_snapshot(Some(n_sig_figs), mantissa, 2);
                             } else {
                                 add_new_snapshot(Some(n_sig_figs), mantissa, 1);
@@ -158,5 +164,112 @@ impl<T> BatchQueue<T> {
 impl<T> Default for BatchQueue<T> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::orderbook::{Coin, Side};
+    use crate::types::inner::InnerL4Order;
+    use alloy::primitives::Address;
+
+    fn create_test_orderbook() -> OrderBooks<InnerL4Order> {
+        let mut order_books = OrderBooks::new();
+        let coin = Coin::new("TEST");
+
+        for i in 0..10 {
+            let bid = InnerL4Order {
+                user: Address::new([0; 20]),
+                coin: coin.clone(),
+                side: Side::Bid,
+                limit_px: crate::orderbook::Px::new(1000 + i * 10),
+                sz: crate::orderbook::Sz::new(100),
+                oid: i,
+                timestamp: 0,
+                trigger_condition: String::new(),
+                is_trigger: false,
+                trigger_px: String::new(),
+                is_position_tpsl: false,
+                reduce_only: false,
+                order_type: String::new(),
+                tif: None,
+                cloid: None,
+            };
+            order_books.add_order(bid);
+        }
+
+        for i in 0..10 {
+            let ask = InnerL4Order {
+                user: Address::new([0; 20]),
+                coin: coin.clone(),
+                side: Side::Ask,
+                limit_px: crate::orderbook::Px::new(2000 + i * 10),
+                sz: crate::orderbook::Sz::new(100),
+                oid: 10 + i,
+                timestamp: 0,
+                trigger_condition: String::new(),
+                is_trigger: false,
+                trigger_px: String::new(),
+                is_position_tpsl: false,
+                reduce_only: false,
+                order_type: String::new(),
+                tif: None,
+                cloid: None,
+            };
+            order_books.add_order(ask);
+        }
+
+        order_books
+    }
+
+    #[test]
+    fn test_compute_l2_snapshots_default() {
+        let order_books = create_test_orderbook();
+        let l2_snapshots = compute_l2_snapshots(&order_books);
+
+        let coin = Coin::new("TEST");
+        assert!(l2_snapshots.as_ref().contains_key(&coin));
+
+        let params_map = l2_snapshots.as_ref().get(&coin).unwrap();
+        let raw_params = L2SnapshotParams { n_sig_figs: None, mantissa: None };
+        let snapshot = params_map.get(&raw_params).unwrap();
+
+        assert_eq!(snapshot.0[0].len(), 10); // 10 bids
+        assert_eq!(snapshot.0[1].len(), 10); // 10 asks
+    }
+
+    #[test]
+    fn test_compute_l2_snapshots_with_max_levels() {
+        let order_books = create_test_orderbook();
+        let max_levels = 3;
+        let l2_snapshots = compute_l2_snapshots_with_max_levels(&order_books, max_levels);
+
+        let coin = Coin::new("TEST");
+        assert!(l2_snapshots.as_ref().contains_key(&coin));
+
+        let params_map = l2_snapshots.as_ref().get(&coin).unwrap();
+        let raw_params = L2SnapshotParams { n_sig_figs: None, mantissa: None };
+        let snapshot = params_map.get(&raw_params).unwrap();
+
+        assert_eq!(snapshot.0[0].len(), max_levels);
+        assert_eq!(snapshot.0[1].len(), max_levels);
+    }
+
+    #[test]
+    fn test_compute_l2_snapshots_default_wrapper() {
+        let order_books = create_test_orderbook();
+        let l2_snapshots_default = compute_l2_snapshots(&order_books);
+        let l2_snapshots_50 = compute_l2_snapshots_with_max_levels(&order_books, 50);
+
+        let coin = Coin::new("TEST");
+        let params_map_default = l2_snapshots_default.as_ref().get(&coin).unwrap();
+        let params_map_50 = l2_snapshots_50.as_ref().get(&coin).unwrap();
+        let raw_params = L2SnapshotParams { n_sig_figs: None, mantissa: None };
+        let snapshot_default = params_map_default.get(&raw_params).unwrap();
+        let snapshot_50 = params_map_50.get(&raw_params).unwrap();
+
+        assert_eq!(snapshot_default.0[0].len(), snapshot_50.0[0].len());
+        assert_eq!(snapshot_default.0[1].len(), snapshot_50.0[1].len());
     }
 }

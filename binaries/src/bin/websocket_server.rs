@@ -48,6 +48,10 @@ struct Args {
     /// Comma-separated list of allowed coins  (default: BTC,ETH,SOL)
     #[arg(long, value_delimiter = ',', default_values_t = vec!["BTC".to_string(), "ETH".to_string(), "SOL".to_string()])]
     allowed_coins: Vec<String>,
+
+    /// Maximum number of price levels to include in L2 orderbook snapshots (default: 50)
+    #[arg(long, default_value = "50")]
+    max_levels: usize,
 }
 
 #[tokio::main]
@@ -89,7 +93,7 @@ async fn main() -> Result<()> {
         tokio::pin!(cleanup_handle);
 
         tokio::select! {
-            result = run_websocket_server(&full_address, true, compression_level, redis_url.as_deref(), &allowed_coins) => {
+            result = run_websocket_server(&full_address, true, compression_level, redis_url.as_deref(), &allowed_coins, args.max_levels) => {
                 result?;
             }
             _ = &mut cleanup_handle => {
@@ -97,7 +101,7 @@ async fn main() -> Result<()> {
             }
         }
     } else {
-        run_websocket_server(&full_address, true, compression_level, redis_url.as_deref(), &vec![]).await?;
+        run_websocket_server(&full_address, true, compression_level, redis_url.as_deref(), &vec![], args.max_levels).await?;
     }
 
     Ok(())

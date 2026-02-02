@@ -67,7 +67,7 @@ impl OrderBookStream {
     pub async fn new(config: StreamConfig) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let (event_tx, _) = broadcast::channel(1024);
 
-        let listener = OrderBookListener::new(None, config.ignore_spot, None, None);
+        let listener = OrderBookListener::new(None, config.ignore_spot, None, None, config.l2_levels);
         let listener = Arc::new(Mutex::new(listener));
 
         Ok(Self { config, listener, event_tx })

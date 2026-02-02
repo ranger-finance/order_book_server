@@ -1,7 +1,6 @@
 use crate::{
     HL_NODE, L2Emitter,
     cache::OrderBookCache,
-    listener::directory::DirectoryListener,
     orderbook::{
         Coin, Snapshot,
         multi_book::{Snapshots, load_snapshots_from_json},
@@ -15,6 +14,7 @@ use crate::{
         node_data::{Batch, EventSource, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
     },
 };
+use directory::DirectoryListener;
 use alloy::primitives::Address;
 use fs::File;
 use log::{error, info, warn};
@@ -35,13 +35,13 @@ use tokio::{
     },
     time::{Instant, interval_at, sleep},
 };
-use utils::{BatchQueue, EventBatch, process_rmp_file, validate_snapshot_consistency};
 
-pub mod cleanup;
+mod cleanup;
 pub mod directory;
 pub mod utils;
 
 pub use cleanup::perform_cleanup;
+use utils::{BatchQueue, EventBatch, process_rmp_file, validate_snapshot_consistency};
 
 // WARNING - this code assumes no other file system operations are occurring in the watched directories
 // if there are scripts running, this may not work as intended
@@ -209,6 +209,7 @@ pub struct OrderBookListener {
     internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
     l2_emitter: Option<Arc<Mutex<L2Emitter>>>,
     allowed_coins: Vec<String>,
+    max_levels: usize,
 }
 
 impl OrderBookListener {
@@ -217,6 +218,7 @@ impl OrderBookListener {
         ignore_spot: bool,
         redis_publisher: Option<Arc<RedisPublisher>>,
         allowed_coins: Option<&Vec<String>>,
+        max_levels: usize,
     ) -> Self {
         let l2_emitter = redis_publisher.map(|publisher| {
             Arc::new(Mutex::new(L2Emitter::new_with_default_interval(OrderBookCache::default(), publisher)))
@@ -235,6 +237,7 @@ impl OrderBookListener {
             internal_message_tx,
             l2_emitter,
             allowed_coins: allowed_coins.or(Some(&Vec::new())).cloned().unwrap_or_default(),
+            max_levels,
         }
     }
 
@@ -332,7 +335,7 @@ impl OrderBookListener {
 
     fn init_from_snapshot(&mut self, snapshot: Snapshots<InnerL4Order>, height: u64) {
         info!("No existing snapshot");
-        let mut new_order_book = OrderBookState::from_snapshot(snapshot, height, 0, true, self.ignore_spot);
+        let mut new_order_book = OrderBookState::from_snapshot(snapshot, height, 0, true, self.ignore_spot, self.max_levels);
         let mut retry = false;
         while let Some((order_statuses, order_diffs)) = self.pop_cache() {
             if new_order_book.apply_updates(order_statuses, order_diffs).is_err() {
