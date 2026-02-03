@@ -8,7 +8,7 @@ use crate::{
     prelude::*,
     types::{
         inner::InnerLevel,
-        node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
+        node_data::{Batch, NodeDataOrderDiff, NodeDataOrderStatus},
     },
 };
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
@@ -128,7 +128,6 @@ pub fn compute_l2_snapshots_with_max_levels<O: InnerOrder + Send + Sync>(
 pub enum EventBatch {
     Orders(Batch<NodeDataOrderStatus>),
     BookDiffs(Batch<NodeDataOrderDiff>),
-    Fills(Batch<NodeDataFill>),
 }
 
 pub struct BatchQueue<T> {

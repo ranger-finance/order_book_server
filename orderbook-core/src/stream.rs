@@ -1,6 +1,6 @@
 use crate::{
     listener::{OrderBookListener, hl_listen},
-    types::node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
+    types::node_data::{NodeDataOrderDiff, NodeDataOrderStatus},
 };
 use orderbook_normaliser::models::UnifiedOrderbook;
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
@@ -20,8 +20,6 @@ pub enum StreamEvent {
         order_statuses: Vec<NodeDataOrderStatus>,
         book_diffs: Vec<NodeDataOrderDiff>,
     },
-    /// Raw fill batch
-    Fill { batch: Batch<NodeDataFill> },
     /// Stream is ready (initial snapshot available)
     Ready,
     /// Error occurred

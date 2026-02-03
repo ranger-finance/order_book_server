@@ -11,7 +11,7 @@ use crate::{
     types::{
         L2Book, L4Order, Level,
         inner::{InnerL4Order, InnerLevel},
-        node_data::{Batch, EventSource, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
+        node_data::{Batch, EventSource, NodeDataOrderDiff, NodeDataOrderStatus},
     },
 };
 use directory::DirectoryListener;
@@ -47,12 +47,10 @@ use utils::{BatchQueue, EventBatch, process_rmp_file, validate_snapshot_consiste
 // if there are scripts running, this may not work as intended
 pub async fn hl_listen(listener: Arc<Mutex<OrderBookListener>>, dir: PathBuf) -> Result<()> {
     let order_statuses_dir = EventSource::OrderStatuses.event_source_dir(&dir).canonicalize()?;
-    let fills_dir = EventSource::Fills.event_source_dir(&dir).canonicalize()?;
     let order_diffs_dir = EventSource::OrderDiffs.event_source_dir(&dir).canonicalize()?;
     println!("Starting to monitor HL node data directories...");
     info!("Monitoring order status directory: {}", order_statuses_dir.display());
     info!("Monitoring order diffs directory: {}", order_diffs_dir.display());
-    info!("Monitoring fills directory: {}", fills_dir.display());
 
     // monitoring the directory via the notify crate (gives file system events)
     let (fs_event_tx, mut fs_event_rx) = unbounded_channel();
@@ -73,7 +71,6 @@ pub async fn hl_listen(listener: Arc<Mutex<OrderBookListener>>, dir: PathBuf) ->
     let (snapshot_fetch_task_tx, mut snapshot_fetch_task_rx) = unbounded_channel::<Result<()>>();
 
     watcher.watch(&order_statuses_dir, RecursiveMode::Recursive)?;
-    watcher.watch(&fills_dir, RecursiveMode::Recursive)?;
     watcher.watch(&order_diffs_dir, RecursiveMode::Recursive)?;
     let start = Instant::now() + Duration::from_secs(5);
     let mut ticker = interval_at(start, Duration::from_secs(10));
@@ -89,12 +86,6 @@ pub async fn hl_listen(listener: Arc<Mutex<OrderBookListener>>, dir: PathBuf) ->
                                 .await
                                 .process_update(&event, new_path, EventSource::OrderStatuses)
                                 .map_err(|err| format!("Order status processing error: {err}"))?;
-                        } else if new_path.starts_with(&fills_dir) && new_path.is_file() {
-                            listener
-                                .lock()
-                                .await
-                                .process_update(&event, new_path, EventSource::Fills)
-                                .map_err(|err| format!("Fill update processing error: {err}"))?;
                         } else if new_path.starts_with(&order_diffs_dir) && new_path.is_file() {
                             listener
                                 .lock()
@@ -196,12 +187,10 @@ fn fetch_snapshot(
 
 pub struct OrderBookListener {
     pub ignore_spot: bool,
-    fill_status_file: Option<File>,
     order_status_file: Option<File>,
     order_diff_file: Option<File>,
     // None if we haven't seen a valid snapshot yet
     order_book_state: Option<OrderBookState>,
-    last_fill: Option<u64>,
     order_diff_cache: BatchQueue<NodeDataOrderDiff>,
     order_status_cache: BatchQueue<NodeDataOrderStatus>,
     // Only Some when we want it to collect updates
@@ -226,11 +215,9 @@ impl OrderBookListener {
 
         Self {
             ignore_spot,
-            fill_status_file: None,
             order_status_file: None,
             order_diff_file: None,
             order_book_state: None,
-            last_fill: None,
             order_diff_cache: BatchQueue::new(),
             order_status_cache: BatchQueue::new(),
             fetched_snapshot_cache: None,
@@ -287,17 +274,6 @@ impl OrderBookListener {
             }
             EventBatch::BookDiffs(batch) => {
                 self.order_diff_cache.push(batch);
-            }
-            EventBatch::Fills(batch) => {
-                if self.last_fill.is_none_or(|height| height < batch.block_number()) {
-                    if let Some(tx) = &self.internal_message_tx {
-                        let tx = tx.clone();
-                        tokio::spawn(async move {
-                            let snapshot = Arc::new(InternalMessage::Fills { batch });
-                            let _unused = tx.send(snapshot);
-                        });
-                    }
-                }
             }
         }
         if self.is_ready() {
@@ -427,7 +403,6 @@ impl OrderBookListener {
 impl DirectoryListener for OrderBookListener {
     fn is_reading(&self, event_source: EventSource) -> bool {
         match event_source {
-            EventSource::Fills => self.fill_status_file.is_some(),
             EventSource::OrderStatuses => self.order_status_file.is_some(),
             EventSource::OrderDiffs => self.order_diff_file.is_some(),
         }
@@ -435,7 +410,6 @@ impl DirectoryListener for OrderBookListener {
 
     fn file_mut(&mut self, event_source: EventSource) -> &mut Option<File> {
         match event_source {
-            EventSource::Fills => &mut self.fill_status_file,
             EventSource::OrderStatuses => &mut self.order_status_file,
             EventSource::OrderDiffs => &mut self.order_diff_file,
         }
@@ -461,10 +435,6 @@ impl DirectoryListener for OrderBookListener {
                 continue;
             }
             let res = match event_source {
-                EventSource::Fills => serde_json::from_str::<Batch<NodeDataFill>>(line).map(|batch| {
-                    let height = batch.block_number();
-                    (height, EventBatch::Fills(batch))
-                }),
                 EventSource::OrderStatuses => serde_json::from_str(line)
                     .map(|batch: Batch<NodeDataOrderStatus>| (batch.block_number(), EventBatch::Orders(batch))),
                 EventSource::OrderDiffs => serde_json::from_str(line)
@@ -529,7 +499,6 @@ pub struct TimedSnapshots {
 // Messages sent from node data listener to websocket dispatch to support streaming
 pub enum InternalMessage {
     Snapshot { l2_snapshots: L2Snapshots, time: u64 },
-    Fills { batch: Batch<NodeDataFill> },
     L4BookUpdates { diff_batch: Batch<NodeDataOrderDiff>, status_batch: Batch<NodeDataOrderStatus> },
 }
 

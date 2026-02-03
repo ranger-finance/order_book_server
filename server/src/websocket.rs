@@ -2,12 +2,12 @@ use axum::{Router, response::IntoResponse, routing::get};
 use futures_util::{SinkExt, StreamExt};
 use log::{error, info};
 use orderbook_core::{
-    L2Book, L4Book, L4BookUpdates, L4Order, RedisConfig, RedisPublisher, Trade, UnifiedOrderbook,
+    L2Book, L4Book, L4BookUpdates, L4Order, RedisConfig, RedisPublisher, UnifiedOrderbook,
     internal::{
         Coin, InnerLevel, InternalMessage, L2SnapshotParams, L2Snapshots, OrderBookListener, Snapshot, TimedSnapshots,
         hl_listen,
     },
-    types::node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
+    types::node_data::{Batch, NodeDataOrderDiff, NodeDataOrderStatus},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -37,8 +37,6 @@ enum ClientMessage {
 #[serde(rename_all = "camelCase")]
 enum Subscription {
     #[serde(rename_all = "camelCase")]
-    Trades { coin: String },
-    #[serde(rename_all = "camelCase")]
     L2Book { coin: String, n_sig_figs: Option<u32>, n_levels: Option<usize>, mantissa: Option<u64> },
     #[serde(rename_all = "camelCase")]
     L4Book { coin: String },
@@ -47,7 +45,6 @@ enum Subscription {
 impl Subscription {
     fn validate(&self, universe: &HashSet<String>) -> bool {
         match self {
-            Self::Trades { coin } => universe.contains(coin),
             Self::L2Book { coin, n_sig_figs, n_levels, mantissa } => {
                 if !universe.contains(coin) || coin.starts_with('@') {
                     info!("Invalid subscription: coin not found");
@@ -98,7 +95,6 @@ enum ServerResponse {
     SubscriptionResponse(ClientMessage),
     L2Book(UnifiedOrderbook),
     L4Book(L4Book),
-    Trades(Vec<Trade>),
     Error(String),
 }
 
@@ -241,13 +237,7 @@ async fn handle_socket(
                                     send_ws_data_from_snapshot(&mut socket, sub, l2_snapshots.as_ref(), *time).await;
                                 }
                             },
-                            InternalMessage::Fills{ batch } => {
-                                let mut trades = coin_to_trades(batch);
-                                for sub in manager.subscriptions() {
-                                    send_ws_data_from_trades(&mut socket, sub, &mut trades).await;
-                                }
-                            },
-                            InternalMessage::L4BookUpdates{ diff_batch, status_batch } => {
+                             InternalMessage::L4BookUpdates{ diff_batch, status_batch } => {
                                 let mut book_updates = coin_to_book_updates(diff_batch, status_batch);
                                 for sub in manager.subscriptions() {
                                     send_ws_data_from_book_updates(&mut socket, sub, &mut book_updates).await;
@@ -398,29 +388,6 @@ async fn send_ws_data_from_snapshot(
     }
 }
 
-fn coin_to_trades(batch: &Batch<NodeDataFill>) -> HashMap<String, Vec<Trade>> {
-    let mut fills = batch.clone().events();
-    let mut trades = HashMap::new();
-    while fills.len() >= 2 {
-        let f2 = fills.pop();
-        let f1 = fills.pop();
-        if let Some(f1) = f1 {
-            if let Some(f2) = f2 {
-                let mut fills = HashMap::new();
-                fills.insert(f1.1.side, f1);
-                fills.insert(f2.1.side, f2);
-                let trade = Trade::from_fills(fills);
-                let coin = trade.coin.clone();
-                trades.entry(coin).or_insert_with(Vec::new).push(trade);
-            }
-        }
-    }
-    for list in trades.values_mut() {
-        list.reverse();
-    }
-    trades
-}
-
 fn coin_to_book_updates(
     diff_batch: &Batch<NodeDataOrderDiff>,
     status_batch: &Batch<NodeDataOrderStatus>,
@@ -449,19 +416,6 @@ async fn send_ws_data_from_book_updates(
     if let Subscription::L4Book { coin } = subscription {
         if let Some(updates) = book_updates.remove(coin) {
             let msg = ServerResponse::L4Book(L4Book::Updates(updates));
-            send_socket_message(socket, msg).await;
-        }
-    }
-}
-
-async fn send_ws_data_from_trades(
-    socket: &mut WebSocket,
-    subscription: &Subscription,
-    trades: &mut HashMap<String, Vec<Trade>>,
-) {
-    if let Subscription::Trades { coin } = subscription {
-        if let Some(trades) = trades.remove(coin) {
-            let msg = ServerResponse::Trades(trades);
             send_socket_message(socket, msg).await;
         }
     }

@@ -3,7 +3,7 @@ use log::{error, info, warn};
 use std::path::PathBuf;
 use tokio::fs;
 
-const HL_DATA_DIRS: &[&str] = &["node_fills_by_block", "node_order_statuses_by_block", "node_raw_book_diffs_by_block"];
+const HL_DATA_DIRS: &[&str] = &["node_order_statuses_by_block", "node_raw_book_diffs_by_block"];
 
 pub async fn perform_cleanup(
     base_dir: PathBuf,

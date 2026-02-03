@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use alloy::primitives::Address;
 use orderbook_normaliser::models::{Exchange, PriceLevel, UnifiedOrderbook};
 use rust_decimal::Decimal;
@@ -7,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     orderbook::types::Side,
-    types::node_data::{NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
+    types::node_data::{NodeDataOrderDiff, NodeDataOrderStatus},
 };
 
 pub mod inner;
@@ -81,25 +79,7 @@ impl L2Book {
     }
 }
 
-impl Trade {
-    #[allow(clippy::unwrap_used)]
-    pub fn from_fills(mut fills: HashMap<Side, NodeDataFill>) -> Self {
-        let NodeDataFill(seller, ask_fill) = fills.remove(&Side::Ask).unwrap();
-        let NodeDataFill(buyer, bid_fill) = fills.remove(&Side::Bid).unwrap();
-        let ask_is_taker = ask_fill.crossed;
-        let side = if ask_is_taker { Side::Ask } else { Side::Bid };
-        let coin = ask_fill.coin.clone();
-        assert_eq!(coin, bid_fill.coin);
-        let tid = ask_fill.tid;
-        assert_eq!(tid, bid_fill.tid);
-        let px = ask_fill.px;
-        let sz = ask_fill.sz;
-        let hash = ask_fill.hash;
-        let time = ask_fill.time;
-        let users = [buyer, seller];
-        Self { coin, side, px, sz, hash, time, tid, users }
-    }
-}
+impl Trade {}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct L4BookUpdates {
@@ -150,32 +130,4 @@ pub enum OrderDiff {
         new_sz: String,
     },
     Remove,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Fill {
-    pub coin: String,
-    pub px: String,
-    pub sz: String,
-    pub side: Side,
-    pub time: u64,
-    pub start_position: String,
-    pub dir: String,
-    pub closed_pnl: String,
-    pub hash: String,
-    pub oid: u64,
-    pub crossed: bool,
-    pub fee: String,
-    pub tid: u64,
-    pub fee_token: String,
-    pub liquidation: Option<Liquidation>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Liquidation {
-    liquidated_user: String,
-    mark_px: String,
-    method: String,
 }

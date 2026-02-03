@@ -64,8 +64,8 @@ pub use redis::{RedisConfig, RedisPublisher};
 
 // Re-export types for consumers who need them
 pub use types::{
-    Fill, L2Book, L4Book, L4BookUpdates, L4Order, Level, OrderDiff, Trade,
-    node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
+    L2Book, L4Book, L4BookUpdates, L4Order, Level, OrderDiff, Trade,
+    node_data::{Batch, NodeDataOrderDiff, NodeDataOrderStatus},
 };
 
 pub use orderbook::{Coin, Px, Side, Sz};

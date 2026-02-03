@@ -192,7 +192,7 @@ mod tests {
     #[tokio::test]
     async fn test_trade_listener() -> Result<()> {
         let mock_path = PathBuf::from(MOCK_HL_DIR);
-        let event_source = EventSource::Fills;
+        let event_source = EventSource::OrderStatuses;
         create_dir_all(event_source.event_source_dir(&mock_path))?;
         let history = Arc::new(Mutex::new(String::new()));
         let mut test_listener = TestListener::new(history.clone());
